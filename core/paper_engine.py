@@ -32,7 +32,8 @@ def open_position(
     decision_id=None,
 ) -> Position:
     fill = simulate_fill(
-        "buy", qty, entry_price, fee_pct=costs_settings["taker_fee_pct"], slippage_pct=costs_settings["slippage_pct"]
+        "buy", qty, entry_price, fee_pct=costs_settings["taker_fee_pct"], slippage_pct=costs_settings["slippage_pct"],
+        gst_pct=costs_settings.get("gst_pct", 0.0),
     )
     cost = -fill.cash_delta
     if cost > wallet.current_cash:
@@ -89,6 +90,7 @@ def close_position(
         fee_pct=costs_settings["taker_fee_pct"],
         slippage_pct=costs_settings["slippage_pct"],
         tds_pct=costs_settings["tds_pct"],
+        gst_pct=costs_settings.get("gst_pct", 0.0),
     )
 
     entry_trade = (

@@ -182,11 +182,15 @@ with get_session() as session:
         taker_fee_pct = c1.number_input("Taker fee %", value=float(costs.get("taker_fee_pct", 0.2)), min_value=0.0, max_value=5.0, format="%.3f")
         tds_pct = c2.number_input("TDS %", value=float(costs.get("tds_pct", 1.0)), min_value=0.0, max_value=5.0, format="%.3f")
         slippage_pct = c2.number_input("Assumed slippage %", value=float(costs.get("slippage_pct", 0.1)), min_value=0.0, max_value=5.0, format="%.3f")
+        gst_pct = st.number_input(
+            "GST % (charged on the trading fee itself, not on notional)",
+            value=float(costs.get("gst_pct", 18.0)), min_value=0.0, max_value=30.0, format="%.2f",
+        )
 
         if st.form_submit_button("Save cost settings"):
             _save_setting(session, "costs", {
                 "maker_fee_pct": maker_fee_pct, "taker_fee_pct": taker_fee_pct,
-                "tds_pct": tds_pct, "slippage_pct": slippage_pct,
+                "tds_pct": tds_pct, "slippage_pct": slippage_pct, "gst_pct": gst_pct,
             })
             st.success("Cost settings saved.")
 

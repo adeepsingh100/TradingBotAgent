@@ -202,7 +202,11 @@ key, at different points in the call chain) vs. what isn't.
   against an official CoinDCX source -- their fee pages blocked
   automated verification. Confirm your actual tier's maker/taker % from
   your CoinDCX account's own Fees page and correct the `settings` row
-  before trusting any paper-trading PnL number.
+  before trusting any paper-trading PnL number. GST (18% default,
+  `costs.gst_pct`) IS modeled -- applied to the trading fee itself, not
+  notional (`core/fees.py::simulate_fill`) -- but only for PAPER fills;
+  a live fill's `fee` comes straight from CoinDCX's own
+  `trade_history` response (already GST-inclusive), never re-taxed.
 - **No sandbox/testnet exists for CoinDCX** -- all API testing (even
   read-only balance/order-status calls in DRY_RUN) hits the real
   exchange with a real account.

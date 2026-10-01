@@ -41,6 +41,10 @@ DEFAULT_SETTINGS = {
         "taker_fee_pct": 0.2,
         "tds_pct": 1.0,
         "slippage_pct": 0.1,
+        # GST on the trading fee itself (India: 18%), not on notional --
+        # core/fees.py::simulate_fill applies this to base fee -- the real
+        # per-trade fee CoinDCX charges is fee_pct * (1 + gst_pct/100).
+        "gst_pct": 18.0,
     },
     "watchlist": ["BTCINR", "ETHINR", "SOLINR"],
     # Live wallets never trade paper's full watchlist or risk profile --

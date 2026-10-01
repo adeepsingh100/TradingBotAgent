@@ -26,7 +26,8 @@ def initialize_benchmarks(session, wallet: Wallet, btc_price: float, costs_setti
     section 7's "costs included at entry"), records both benchmarks'
     first equity_history point."""
     fill = simulate_fill(
-        "buy", qty=1.0, price=btc_price, fee_pct=costs_settings["taker_fee_pct"], slippage_pct=costs_settings["slippage_pct"]
+        "buy", qty=1.0, price=btc_price, fee_pct=costs_settings["taker_fee_pct"], slippage_pct=costs_settings["slippage_pct"],
+        gst_pct=costs_settings.get("gst_pct", 0.0),
     )
     # fill.cash_delta is the signed cost of buying 1 unit at this price+fee -- scale to spend exactly starting_capital
     btc_qty = wallet.starting_capital / abs(fill.cash_delta)

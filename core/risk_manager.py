@@ -111,7 +111,8 @@ def evaluate(proposal: Proposal, ctx: RiskContext) -> RiskVerdict:
     from core.fees import roundtrip_cost_pct  # local import -- avoids a module-load-order cycle with fees.py
 
     cost_pct = roundtrip_cost_pct(
-        taker_fee_pct=costs["taker_fee_pct"], tds_pct=costs["tds_pct"], slippage_pct=costs["slippage_pct"]
+        taker_fee_pct=costs["taker_fee_pct"], tds_pct=costs["tds_pct"], slippage_pct=costs["slippage_pct"],
+        gst_pct=costs.get("gst_pct", 0.0),
     )
     cost_distance = proposal.entry * cost_pct / 100
     min_multiple = risk["min_reward_to_cost_multiple"]

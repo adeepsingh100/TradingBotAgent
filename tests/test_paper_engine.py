@@ -75,6 +75,19 @@ def test_open_position_deducts_cash_including_fee_and_slippage():
     assert len(trades) == 1 and trades[0].side == "buy"
 
 
+def test_open_position_applies_gst_on_fee_when_configured():
+    session = FakeSession()
+    wallet = _wallet(cash=1000.0)
+    costs_with_gst = {**COSTS, "gst_pct": 18.0}
+
+    position = open_position(session, wallet, pair="BTCINR", qty=0.0001, entry_price=8000000,
+                              stop_loss=7900000, take_profit=8300000, costs_settings=costs_with_gst)
+
+    base_fee = position.qty * position.entry_price * 0.002
+    cost = position.qty * position.entry_price + base_fee * 1.18
+    assert wallet.current_cash == pytest.approx(1000.0 - cost)
+
+
 def test_open_position_rejects_when_cash_insufficient():
     session = FakeSession()
     wallet = _wallet(cash=1.0)

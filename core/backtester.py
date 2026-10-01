@@ -76,7 +76,7 @@ def run_backtest(
                 fill = simulate_fill(
                     "sell", position["qty"], exit_price,
                     fee_pct=costs_settings["taker_fee_pct"], slippage_pct=costs_settings["slippage_pct"],
-                    tds_pct=costs_settings["tds_pct"],
+                    tds_pct=costs_settings["tds_pct"], gst_pct=costs_settings.get("gst_pct", 0.0),
                 )
                 pnl = fill.cash_delta - position["cost_basis"]
                 cash += fill.cash_delta
@@ -96,6 +96,7 @@ def run_backtest(
                 fill = simulate_fill(
                     "buy", qty, entry_price,
                     fee_pct=costs_settings["taker_fee_pct"], slippage_pct=costs_settings["slippage_pct"],
+                    gst_pct=costs_settings.get("gst_pct", 0.0),
                 )
                 cost_basis = qty * fill.fill_price + fill.fee
                 if -fill.cash_delta <= cash and qty > 0:
