@@ -19,7 +19,9 @@ langchain==1.4.3
 langchain-core==1.6.6
 langgraph==1.2.12
 langchain-nvidia-ai-endpoints==1.4.3   # live-verified, Phase 5 report
-langchain-cockroachdb==0.3.0            # live-verified, Phase 5 report -- LangGraph checkpointer for CockroachDB
+# langchain-cockroachdb (CockroachDBSaver) NOT added -- Phase 5's graph
+# compiles with no checkpointer; see worker/agent/graph.py's docstring
+# for why that's a deliberate v1 choice, not an oversight.
 # langchain-anthropic / langchain-openai added when the provider factory's
 # non-default branch is actually exercised -- no point pinning an unused
 # provider's SDK in v1.

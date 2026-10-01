@@ -24,12 +24,18 @@ in-memory state:
 
 - **core/** -- shared code every other part imports: config, DB models/
   session, CoinDCX client, fee/tax model, risk manager, strategy
-  library, paper engine, LLM provider factory, Telegram notifier.
-- **worker/** -- FastAPI app. `POST /tick` runs exactly one full agent
-  cycle and returns a JSON summary; no long-running loop in production
-  (`run_local.py` loops locally for dev). Stateless between ticks --
-  loads all state from the DB at the start of a tick, persists
-  everything before returning.
+  library, paper engine, LLM provider factory (`core/llm/provider.py`),
+  tick lock (`core/lock.py`), heartbeat (`core/heartbeat.py`), Telegram
+  notifier (`core/telegram.py` + `core/alerts.py`).
+- **worker/** -- FastAPI app (`worker/app.py`). `POST /tick` runs
+  exactly one full agent cycle (`worker/cycle.py::run_cycle`) and
+  returns a JSON summary; no long-running loop in production
+  (`worker/run_local.py` loops locally for dev, same `run_cycle()`, no
+  HTTP). Stateless between ticks -- loads all state from the DB at the
+  start of a tick, persists everything before returning. The LangGraph
+  agent itself lives under `worker/agent/` (`state.py`, `nodes.py`,
+  `graph.py`, `schemas.py`) -- worker-specific, not shared with `app/`,
+  since the dashboard never runs agent logic.
 - **app/** -- Streamlit dashboard. Reads the DB, writes control
   commands/settings rows. NEVER runs agent logic or places trades.
 
@@ -102,6 +108,52 @@ index (`positions_wallet_pair_open_key`, `WHERE closed_at IS NULL`),
 not a plain `UniqueConstraint` -- a plain one would permanently block
 re-entering a pair after the first position in it ever closed.
 
+### Agent cycle (`worker/agent/`, LangGraph, no checkpointer)
+
+One `worker.agent.graph.build_graph()` invocation per alive wallet per
+tick: `load_market -> check_exits -> strategize ->
+generate_mechanical_signals -> decide -> risk_and_execute`. Compiled
+with **no checkpointer** -- the worker is stateless between ticks by
+design (above), and v1 has no interrupt that needs to pause/resume a
+graph run across requests, so there's nothing to persist beyond what
+each node already writes to the DB directly.
+
+Two LLM call sites, both logged to `llm_calls` (`node` column):
+- **strategize** -- once per wallet per tick (not per pair). Given each
+  candidate pair's (no open position) recent price action, picks which
+  of the 5 registered strategy TYPES to apply this tick. Never tunes a
+  strategy's params -- those stay at whatever
+  `scripts/seed_strategies.py` seeded.
+- **decide** -- only called for a pair whose mechanically-generated
+  `StrategySignal` is already `buy` (a mechanical `hold` never costs an
+  LLM call). The LLM sets only `action`/`size_inr`/`confidence`/
+  `reasoning` on a `core.risk_manager.Proposal` -- `risk_and_execute`
+  always overwrites `pair`/`entry`/`stop_loss`/`take_profit`/
+  `strategy_id` from the mechanical signal and the live price
+  afterwards, never trusting the LLM to recall price levels it was
+  already handed. `core.risk_manager.evaluate()` then gates the result
+  exactly as it would any other proposal.
+
+**Exits are never LLM-gated** -- `check_exits` is pure mechanical
+stop/target (`paper_engine.check_stop_or_target`), same reasoning
+AI-Trader's own CLAUDE.md documents for removing its LLM signal-
+validation gate after a real outage. Any LLM call that errors (bad
+response, timeout, provider outage -- no typed rate-limit exception
+exists to special-case) returns `None` from `core.llm.provider
+.call_structured`, which both LLM nodes treat as "no decision" ->
+mechanical hold / no trade, never a crash and never an open-ended
+retry.
+
+**Verified live** (Phase 5 report): both schemas (`StrategizeOutput`,
+`core.risk_manager.Proposal`) work with ChatNVIDIA's
+`.with_structured_output()` on `nvidia/nemotron-3-super-120b-a12b`. A
+real `run_cycle()` ran end to end against the real DB/CoinDCX API/NVIDIA
+API -- caught and fixed one real bug this way: a wallet's first-ever
+tick called both `initialize_benchmarks` AND `record_benchmark_tick` in
+the same pass, double-writing its first `equity_history` point (fixed
+in `worker/cycle.py` -- skip the `record` call on the tick that just
+initialized).
+
 ## Commands
 
 ```bash
@@ -116,12 +168,15 @@ uv pip install -r requirements.txt
 .venv/bin/python -m alembic upgrade head
 .venv/bin/python -m scripts.check_db_connection
 .venv/bin/python -m scripts.seed_wallets
+.venv/bin/python -m scripts.seed_strategies
 
-# refresh market_cache (run once daily in production -- Phase 5's
-# worker will do this itself; manual for now)
+# refresh market_cache (run manually, roughly daily -- the worker tick
+# does NOT do this itself; re-fetching all 339 pairs' details every
+# 5-15 min would be wasteful for data that changes rarely)
 .venv/bin/python -c "from core.coindcx.market_cache import refresh_market_cache; print(refresh_market_cache())"
 
-# worker (Phase 5+)
+# worker -- FastAPI app (what Render runs) or the no-HTTP dev loop
+.venv/bin/uvicorn worker.app:app --reload
 .venv/bin/python -m worker.run_local
 
 # dashboard (Phase 6+)
@@ -177,8 +232,31 @@ summarize, wait for go-ahead before the next:
   job. All 5 real `backtests` rows persisted (this one wasn't rolled
   back, unlike Phase 3's throwaway-wallet check -- these ARE the real
   first backtest history, not a disposable test).
-- [ ] Phase 5 -- LangGraph agent with ChatNVIDIA, FastAPI worker,
-  lock, heartbeat, `run_local.py`, LLM call logging, Telegram alerts.
+- [x] **Phase 5** -- LangGraph agent (`worker/agent/`: `load_market ->
+  check_exits -> strategize -> generate_mechanical_signals -> decide ->
+  risk_and_execute`, no checkpointer -- see "Agent cycle" above) with
+  ChatNVIDIA via `core/llm/provider.py`, FastAPI worker (`worker/app.py`
+  `POST /tick` + `GET /health`, token-gated), tick lock (`core/lock.py`,
+  atomic conditional-UPDATE CAS), heartbeat (`core/heartbeat.py`),
+  `worker/run_local.py`, LLM call logging (`llm_calls`, via
+  `call_structured`), Telegram alerts (`core/telegram.py` +
+  `core/alerts.py`, with per-alert-type cooldowns for stateful alerts).
+  114 tests passing. Verified live end to end against the real DB/
+  CoinDCX API/NVIDIA API: both LLM schemas work with ChatNVIDIA
+  structured output on the real model; a real `run_cycle()` ran twice
+  (confirmed the tick lock blocks a second run while held, and
+  correctly allows one once the TTL expires); the real FastAPI app
+  rejected a wrong tick token and ran a real cycle with the correct
+  one; real `decisions`/`llm_calls`/`heartbeats`/`equity_history` rows
+  landed in the real DB. Neither real tick produced a mechanical buy
+  signal for either wallet (a legitimate real market outcome, not a
+  gap -- the buy/approve/execute path is covered by mocked tests in
+  `tests/test_agent_nodes.py`/`tests/test_agent_graph.py`). **Found and
+  fixed a real bug live**: a wallet's first-ever tick called both
+  `initialize_benchmarks` and `record_benchmark_tick` in the same pass,
+  double-writing its first `equity_history` point -- fixed in
+  `worker/cycle.py` (skip `record_benchmark_tick` on the tick that just
+  initialized), with a regression test added.
 - [ ] Phase 6 -- Streamlit dashboard with Firebase auth, all pages,
   deployment docs (Render + cron-job.org + Streamlit Cloud).
 - [ ] Phase 7 (later, on request only) -- live trading engine.

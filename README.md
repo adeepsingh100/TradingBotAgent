@@ -35,7 +35,11 @@ Added in Phase 6 -- not needed yet.
 
 ### 5. Telegram bot
 
-Added in Phase 5 -- not needed yet.
+Message [@BotFather](https://t.me/BotFather) to create a bot and get a
+token, message your new bot once, then fetch
+`https://api.telegram.org/bot<token>/getUpdates` to find your chat id.
+Put both in `.env` as `TELEGRAM_BOT_TOKEN`/`TELEGRAM_CHAT_ID`. Optional
+-- alerts just silently no-op (`core/telegram.py`) if either is blank.
 
 ### Local install
 
@@ -50,24 +54,42 @@ cp .env.example .env   # fill in DATABASE_URL, TICK_TOKEN, NVIDIA_API_KEY, CoinD
 .venv/bin/python -m alembic upgrade head
 .venv/bin/python -m scripts.check_db_connection
 .venv/bin/python -m scripts.seed_wallets
+.venv/bin/python -m scripts.seed_strategies
 .venv/bin/python -m pytest
 ```
 
 ### Running locally
 
-Worker: added Phase 5. Dashboard: added Phase 6.
+```bash
+# FastAPI worker, for hitting /tick manually or with a local cron
+.venv/bin/uvicorn worker.app:app --reload
+curl -X POST localhost:8000/tick -H "X-Tick-Token: $TICK_TOKEN"
+
+# or skip HTTP entirely -- loops run_cycle() directly, same code path
+.venv/bin/python -m worker.run_local
+```
+
+Dashboard: added Phase 6.
 
 ## Deploying
 
 ### Worker to Render
 
-Added Phase 5/6 -- `render.yaml` will live at the repo root once the
-worker exists.
+Create a Render **Web Service** from this repo: build command
+`pip install -r requirements.txt`, start command
+`uvicorn worker.app:app --host 0.0.0.0 --port $PORT`. Set
+`DATABASE_URL`, `TICK_TOKEN`, `NVIDIA_API_KEY`, `COINDCX_API_KEY`,
+`COINDCX_API_SECRET`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` as
+Render env vars (same names as `.env`). Render free-tier web services
+sleep when idle -- that's fine, cron-job.org's hit on `/tick` wakes it.
 
 ### cron-job.org
 
-Added Phase 5/6 -- will document the exact URL, `X-Tick-Token` header,
-and interval once `/tick` exists.
+Create a cron job hitting `POST https://<your-render-app>.onrender.com/tick`
+with header `X-Tick-Token: <same value as TICK_TOKEN>`. Interval: spec
+section 3's cadence (every 5-15 minutes is reasonable for v1 -- the
+tick lock, `core/lock.py`, makes an overlapping/retried call a no-op,
+not a double-tick).
 
 ### Dashboard to Streamlit Community Cloud
 
@@ -107,7 +129,15 @@ in `.env`/Render env vars, not a code change.
 - **CockroachDB is not Postgres** -- see `CLAUDE.md`'s list of
   dialect gaps already designed around. If something SQL-shaped fails
   mysteriously, check that list before assuming it's a logic bug.
-- **`langchain-cockroachdb` (the LangGraph checkpointer package for
-  CockroachDB) is young (v0.3.x as of this writing)** -- smoke-test it
-  directly in Phase 5 before relying on it; a custom SQLAlchemy-table
-  saver is the documented fallback if it misbehaves.
+- **No LangGraph checkpointer is wired up.** `worker/agent/graph.py`
+  compiles with none -- v1 has no human-in-the-loop interrupt to pause/
+  resume across requests, and the worker is stateless by design
+  anyway, so there was nothing for a checkpointer to persist. Revisit
+  `langchain-cockroachdb`'s `CockroachDBSaver` only if a future phase
+  adds a mid-cycle interrupt (e.g. a dashboard approval step).
+- **The `strategize`/`decide` LLM nodes see only the last 100 1h
+  candles and each pair's current `strategies.params` row** -- the LLM
+  picks a strategy TYPE and sizes/judges a proposed entry, but never
+  tunes a strategy's params; params stay at whatever
+  `scripts/seed_strategies.py` seeded until a dashboard control for
+  that exists.

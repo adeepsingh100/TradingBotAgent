@@ -1,0 +1,153 @@
+"""Runs exactly one full agent cycle: acquire the tick lock, loop over
+every alive agent's wallet, run the LangGraph agent for each, check for
+death, record benchmarks/heartbeat, and return a JSON-able summary.
+worker/app.py's POST /tick is a thin wrapper around this.
+
+Stateless between calls (spec section 3): every value needed is
+queried fresh from the DB at the top of this function, nothing cached
+across ticks. All queries below use `.all()` + a Python-side filter
+rather than `Query.filter(...)` with SQLAlchemy expressions -- not a
+CockroachDB constraint, just keeping every query shape simple enough
+for the hand-rolled FakeSession this repo's whole test suite uses
+(see tests/test_cycle.py).
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timedelta, timezone
+
+from core.alerts import maybe_send_alert
+from core.benchmarks import initialize_benchmarks, record_benchmark_tick
+from core.coindcx import client as coindcx_client
+from core.config import settings as env
+from core.db.models import Agent, MarketCache, Setting, Strategy, Trade
+from core.db.session import get_session
+from core.heartbeat import beat
+from core.llm.provider import get_llm
+from core.lock import acquire_tick_lock
+from core.paper_engine import equity, get_open_positions, is_dead, kill_wallet
+from core.risk_manager import consecutive_losses
+
+from .agent.graph import build_graph
+
+_GRAPH = build_graph()
+_BTC_PAIR_CODE = "I-BTC_INR"
+
+
+def _load_settings(session) -> dict:
+    return {row.key: row.value for row in session.query(Setting).all()}
+
+
+def _pair_map(session, watchlist: list[str]) -> dict[str, str]:
+    return {
+        row.raw.get("symbol"): row.pair
+        for row in session.query(MarketCache).all()
+        if row.raw.get("symbol") in watchlist
+    }
+
+
+def _fetch_btc_price() -> float | None:
+    try:
+        rows = coindcx_client.get_candles(_BTC_PAIR_CODE, "1h", limit=1)
+        return rows[0]["close"] if rows else None
+    except Exception:  # noqa: BLE001 -- a benchmark we can't price this tick just skips, never crashes the cycle
+        return None
+
+
+def _wallet_risk_state(session, wallet, risk: dict) -> dict:
+    all_trades = session.query(Trade).filter_by(wallet_id=wallet.id).all()
+    today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
+
+    trades_today_count = sum(1 for t in all_trades if t.side == "buy" and t.executed_at >= today_start)
+    todays_closed = [t for t in all_trades if t.pnl is not None and t.executed_at >= today_start]
+    daily_pnl = sum(t.pnl for t in todays_closed)
+    daily_pnl_pct = (daily_pnl / wallet.starting_capital * 100) if wallet.starting_capital else 0.0
+
+    closed_sorted = sorted((t for t in all_trades if t.pnl is not None), key=lambda t: t.executed_at, reverse=True)
+    losses_in_a_row = consecutive_losses([t.pnl for t in closed_sorted])
+    cooldown_until = None
+    if closed_sorted and losses_in_a_row >= risk.get("consecutive_losses_trigger", 3):
+        cooldown_until = closed_sorted[0].executed_at + timedelta(hours=risk.get("cooldown_hours_after_losses", 4))
+
+    return {"trades_today_count": trades_today_count, "daily_pnl_pct": daily_pnl_pct, "cooldown_until": cooldown_until}
+
+
+def _run_wallet_tick(session, wallet, agent, pair_map, strategies, risk, costs, global_settings, llm, llm_settings) -> dict:
+    open_positions = get_open_positions(session, wallet.id)
+    risk_state = _wallet_risk_state(session, wallet, risk)
+
+    state = {
+        "session": session, "wallet": wallet, "agent": agent,
+        "watchlist": list(pair_map.keys()), "pair_map": pair_map,
+        "open_positions": open_positions, "strategies": strategies,
+        "risk_settings": risk, "costs_settings": costs,
+        "equity": 0.0,  # overwritten by check_exits once prices are loaded
+        "kill_switch": global_settings.get("kill_switch", False),
+        "llm": llm, "llm_provider": llm_settings.get("provider", "nvidia"), "llm_model": llm_settings.get("model", ""),
+        "candles": {}, "prices": {}, "strategy_assignment": {}, "signals": {}, "proposals": {}, "results": [],
+        **risk_state,
+    }
+    result_state = _GRAPH.invoke(state)
+    return {
+        "wallet": wallet.name,
+        "equity": equity(wallet, get_open_positions(session, wallet.id), result_state.get("prices", {})),
+        "prices": result_state.get("prices", {}),
+        "results": result_state.get("results", []),
+    }
+
+
+def run_cycle(holder: str = "worker") -> dict:
+    with get_session() as session:
+        if not acquire_tick_lock(session, holder=holder):
+            return {"skipped": "tick lock held by another run"}
+
+        settings_map = _load_settings(session)
+        risk = settings_map.get("risk", {})
+        costs = settings_map.get("costs", {})
+        watchlist = settings_map.get("watchlist", [])
+        llm_settings = settings_map.get("llm", {})
+        global_settings = settings_map.get("global", {})
+        death_threshold_pct = settings_map.get("death_threshold_pct", env.death_threshold_pct)
+
+        pair_map = _pair_map(session, watchlist)
+        strategies = {s.type: s for s in session.query(Strategy).all() if s.status != "retired"}
+
+        try:
+            llm = get_llm(
+                llm_settings.get("provider", env.llm_provider), llm_settings.get("model", env.llm_model),
+                {"nvidia_api_key": env.nvidia_api_key, "anthropic_api_key": env.anthropic_api_key, "openai_api_key": env.openai_api_key},
+            )
+        except Exception:  # noqa: BLE001 -- misconfigured provider degrades this tick to mechanical-signal-only, never crashes the worker
+            llm = None
+
+        btc_price = _fetch_btc_price()
+        wallet_summaries = []
+        for agent in session.query(Agent).all():
+            if agent.status != "alive":
+                continue
+            wallet = agent.wallet
+
+            benchmark_key = f"benchmark_btc:{wallet.id}"
+            just_initialized_benchmarks = False
+            if btc_price is not None and session.query(Setting).filter_by(key=benchmark_key).one_or_none() is None:
+                initialize_benchmarks(session, wallet, btc_price, costs)
+                just_initialized_benchmarks = True  # already wrote this tick's first equity_history point
+
+            summary = _run_wallet_tick(session, wallet, agent, pair_map, strategies, risk, costs, global_settings, llm, llm_settings)
+            wallet_summaries.append(summary)
+
+            still_open = get_open_positions(session, wallet.id)
+            current_equity = equity(wallet, still_open, summary["prices"])
+            if is_dead(wallet, current_equity, death_threshold_pct):
+                kill_wallet(session, wallet, agent, still_open, summary["prices"], costs)
+                maybe_send_alert(
+                    session, "agent_died", settings_map,
+                    f"Wallet '{wallet.name}' died -- equity {current_equity:.2f} fell below "
+                    f"{death_threshold_pct}% of starting capital.",
+                    wallet_id=wallet.id,
+                )
+            elif btc_price is not None and not just_initialized_benchmarks:
+                record_benchmark_tick(session, wallet, btc_price)
+
+        beat(session, "worker_tick", detail={"wallets": len(wallet_summaries)})
+        return {"wallets": wallet_summaries}

@@ -1,0 +1,197 @@
+"""Graph nodes, in pipeline order: load_market -> check_exits ->
+strategize -> generate_mechanical_signals -> decide -> risk_and_execute.
+
+Design decision worth flagging: `decide` lets the LLM set only
+`action`/`size_inr`/`confidence`/`reasoning`. `risk_and_execute` always
+overwrites `pair`/`entry`/`stop_loss`/`take_profit`/`strategy_id` from
+the mechanical strategy signal and the live price, never from whatever
+the LLM returned in those fields -- a money-handling path has no
+reason to trust an LLM to recall price levels it was already handed,
+only to trust it with the smaller judgment call of whether/how much to
+size a trade someone else already found. Exits are never LLM-gated at
+all (check_exits is pure mechanical stop/target, like paper_engine
+everywhere else) -- same reasoning AI-Trader's own README documents
+for why it removed its LLM signal-validation gate after an outage;
+Survivor's LLM involvement is deliberately confined to sizing/entry
+judgment on the one leg (entries) where a bad call only risks capital
+already budgeted by the risk manager, never to exits where a stuck
+LLM call would leave a position unprotected.
+"""
+
+from __future__ import annotations
+
+from datetime import datetime, timezone
+
+from core.coindcx import client
+from core.db.models import Decision
+from core.llm.provider import call_structured
+from core.paper_engine import check_stop_or_target, close_position, equity, open_position
+from core.risk_manager import Proposal, RiskContext, evaluate
+from core.strategies.registry import generate_signal
+
+from .schemas import StrategizeOutput
+
+
+def load_market(state: dict) -> dict:
+    candles, prices = {}, {}
+    for symbol, pair_code in state["pair_map"].items():
+        rows = client.get_candles(pair_code, "1h", limit=100)
+        rows = list(reversed(rows))  # API returns newest-first; every consumer here needs oldest-first
+        candles[symbol] = rows
+        if rows:
+            prices[symbol] = rows[-1]["close"]
+    return {"candles": candles, "prices": prices}
+
+
+def check_exits(state: dict) -> dict:
+    session, wallet, costs = state["session"], state["wallet"], state["costs_settings"]
+    closed_pairs = []
+    for position in state["open_positions"]:
+        rows = state["candles"].get(position.pair)
+        if not rows:
+            continue
+        last = rows[-1]
+        reason, exit_price = check_stop_or_target(position, last["high"], last["low"])
+        if reason is None:
+            continue
+        close_position(session, wallet, position, exit_price=exit_price, costs_settings=costs)
+        closed_pairs.append(position.pair)
+
+    remaining = [p for p in state["open_positions"] if p.pair not in closed_pairs]
+    current_equity = equity(wallet, remaining, state["prices"])
+    return {"open_positions": remaining, "equity": current_equity}
+
+
+def strategize(state: dict) -> dict:
+    """One LLM call per wallet per tick (not per pair) -- picks which
+    strategy TYPE best fits each candidate pair's current conditions.
+    Never tunes params (those stay at whatever scripts/seed_strategies.py
+    seeded); picking among the 5 already-registered types is the whole
+    job here."""
+    open_pairs = {p.pair for p in state["open_positions"]}
+    candidate_pairs = [s for s in state["watchlist"] if s not in open_pairs]
+    llm = state.get("llm")
+    if not candidate_pairs or llm is None:
+        return {"strategy_assignment": {}}
+
+    context_lines = []
+    for symbol in candidate_pairs:
+        rows = state["candles"].get(symbol, [])
+        if len(rows) < 20:
+            continue
+        recent = rows[-20:]
+        change_pct = (recent[-1]["close"] - recent[0]["close"]) / recent[0]["close"] * 100
+        context_lines.append(f"{symbol}: last_price={recent[-1]['close']:.2f}, recent_change={change_pct:.2f}%")
+    if not context_lines:
+        return {"strategy_assignment": {}}
+
+    strategy_types = sorted(state["strategies"].keys())
+    prompt = (
+        "Choose ONE trading strategy type per pair for this tick, based on its recent trend/volatility.\n"
+        f"Available strategy types: {strategy_types}\n"
+        "Recent market context:\n" + "\n".join(context_lines) + "\n"
+        "Only include pairs you have a clear opinion on; omit the rest."
+    )
+    result = call_structured(
+        state["session"], llm, StrategizeOutput, [{"role": "user", "content": prompt}],
+        node="strategize", wallet_id=state["wallet"].id, provider=state["llm_provider"], model=state["llm_model"],
+    )
+    if result is None:
+        return {"strategy_assignment": {}}
+
+    assignment = {
+        a.pair: a.strategy_type
+        for a in result.assignments
+        if a.pair in candidate_pairs and a.strategy_type in state["strategies"]
+    }
+    return {"strategy_assignment": assignment}
+
+
+def generate_mechanical_signals(state: dict) -> dict:
+    signals = {}
+    for symbol, strategy_type in state["strategy_assignment"].items():
+        strategy = state["strategies"][strategy_type]
+        rows = state["candles"].get(symbol)
+        if not rows:
+            continue
+        signal = generate_signal(strategy_type, rows, strategy.params, has_position=False)
+        signals[symbol] = (strategy, signal)
+    return {"signals": signals}
+
+
+def decide(state: dict) -> dict:
+    """Only called for pairs whose mechanical signal is already `buy`
+    -- a mechanical `hold` never costs an LLM call."""
+    llm = state.get("llm")
+    proposals = {}
+    for symbol, (strategy, signal) in state["signals"].items():
+        if signal.action != "buy":
+            continue
+        if llm is None:
+            proposals[symbol] = None
+            continue
+        price = state["prices"][symbol]
+        prompt = (
+            f"Strategy '{strategy.type}' generated a BUY signal for {symbol} at price {price}.\n"
+            f"Proposed stop_loss={signal.stop_loss}, take_profit={signal.take_profit}.\n"
+            f"Strategy reasoning: {signal.reasoning}\n"
+            f"Wallet equity: {state['equity']:.2f} INR. Max position size: "
+            f"{state['risk_settings'].get('max_position_size_pct')}% of equity.\n"
+            "Decide whether to take this trade. Use the given entry/stop_loss/take_profit exactly as "
+            "provided -- you only set action ('buy' or 'hold'), size_inr, confidence (0-1), and reasoning."
+        )
+        proposals[symbol] = call_structured(
+            state["session"], llm, Proposal, [{"role": "user", "content": prompt}],
+            node="decide", wallet_id=state["wallet"].id, provider=state["llm_provider"], model=state["llm_model"],
+        )
+    return {"proposals": proposals}
+
+
+def risk_and_execute(state: dict) -> dict:
+    session, wallet = state["session"], state["wallet"]
+    results = []
+    for symbol, (strategy, signal) in state["signals"].items():
+        if signal.action != "buy":
+            session.add(Decision(
+                wallet_id=wallet.id, strategy_id=strategy.id,
+                proposal={"action": "hold", "pair": symbol, "reasoning": signal.reasoning},
+                risk_verdict="hold", risk_reason="mechanical strategy signal was not a buy",
+            ))
+            results.append({"pair": symbol, "verdict": "hold", "reason": "no buy signal"})
+            continue
+
+        proposal = state["proposals"].get(symbol) or Proposal(
+            action="hold", pair=symbol, reasoning="no LLM decision available -- held"
+        )
+        proposal.pair = symbol
+        proposal.entry = state["prices"][symbol]
+        proposal.stop_loss = signal.stop_loss
+        proposal.take_profit = signal.take_profit
+        proposal.strategy_id = str(strategy.id)
+
+        ctx = RiskContext(
+            equity=state["equity"], open_positions_count=len(state["open_positions"]),
+            trades_today_count=state["trades_today_count"], daily_pnl_pct=state["daily_pnl_pct"],
+            cooldown_until=state["cooldown_until"], now=datetime.now(timezone.utc),
+            kill_switch=state["kill_switch"], risk_settings=state["risk_settings"], costs_settings=state["costs_settings"],
+        )
+        verdict = evaluate(proposal, ctx)
+
+        decision = Decision(
+            wallet_id=wallet.id, strategy_id=strategy.id, proposal=proposal.model_dump(),
+            risk_verdict=verdict.verdict, risk_reason=verdict.reason,
+        )
+        session.add(decision)
+        session.flush()
+
+        if verdict.verdict in ("approved", "downsized"):
+            position = open_position(
+                session, wallet, pair=symbol, qty=verdict.approved_qty, entry_price=proposal.entry,
+                stop_loss=proposal.stop_loss, take_profit=proposal.take_profit,
+                costs_settings=state["costs_settings"], strategy_id=strategy.id, decision_id=decision.id,
+            )
+            session.flush()
+            decision.executed_trade_id = position.id
+
+        results.append({"pair": symbol, "verdict": verdict.verdict, "reason": verdict.reason})
+    return {"results": results}

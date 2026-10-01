@@ -1,0 +1,77 @@
+"""No real LLM calls -- `llm` is a tiny stand-in object exposing
+`.with_structured_output(schema).invoke(messages)`, matching the one
+method call_structured ever calls on it."""
+
+from __future__ import annotations
+
+import pytest
+from pydantic import BaseModel
+
+from core.llm.provider import call_structured, get_llm
+
+
+class _Schema(BaseModel):
+    value: str
+
+
+class _FakeStructuredLLM:
+    def __init__(self, result=None, exc=None):
+        self._result = result
+        self._exc = exc
+
+    def invoke(self, messages):
+        if self._exc is not None:
+            raise self._exc
+        return self._result
+
+
+class _FakeLLM:
+    def __init__(self, result=None, exc=None):
+        self._result, self._exc = result, exc
+
+    def with_structured_output(self, schema):
+        return _FakeStructuredLLM(self._result, self._exc)
+
+
+class _FakeQuery:
+    def all(self):
+        return []
+
+
+class FakeSession:
+    def __init__(self):
+        self.added = []
+
+    def add(self, obj):
+        self.added.append(obj)
+
+
+def test_get_llm_raises_on_unknown_provider():
+    with pytest.raises(ValueError):
+        get_llm("made-up-provider", "some-model", {})
+
+
+def test_call_structured_returns_result_and_logs_a_success_row():
+    session = FakeSession()
+    llm = _FakeLLM(result=_Schema(value="ok"))
+
+    result = call_structured(session, llm, _Schema, [{"role": "user", "content": "hi"}],
+                              node="decide", wallet_id="w1", provider="nvidia", model="m")
+
+    assert result == _Schema(value="ok")
+    assert len(session.added) == 1
+    assert session.added[0].success is True
+    assert session.added[0].node == "decide"
+
+
+def test_call_structured_returns_none_and_logs_a_failure_row_on_any_exception():
+    session = FakeSession()
+    llm = _FakeLLM(exc=RuntimeError("provider timeout"))
+
+    result = call_structured(session, llm, _Schema, [{"role": "user", "content": "hi"}],
+                              node="strategize", wallet_id="w1", provider="nvidia", model="m")
+
+    assert result is None
+    assert len(session.added) == 1
+    assert session.added[0].success is False
+    assert "provider timeout" in session.added[0].error
