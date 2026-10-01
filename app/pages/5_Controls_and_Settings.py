@@ -1,6 +1,7 @@
 import sys
 import uuid
-from datetime import datetime, timezone
+from datetime import datetime
+from zoneinfo import ZoneInfo
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -78,7 +79,7 @@ with get_session() as session:
             )
             typed = st.text_input("Type ENABLE LIVE TRADING to confirm", key="enable_live_confirm")
             if st.button("Confirm enable", key="enable_live_btn", disabled=(typed != "ENABLE LIVE TRADING")):
-                _save_setting(session, "live_trading", {"enabled": True, "enabled_by": email, "enabled_at": datetime.now(timezone.utc).isoformat()})
+                _save_setting(session, "live_trading", {"enabled": True, "enabled_by": email, "enabled_at": datetime.now(ZoneInfo("Asia/Kolkata")).isoformat(timespec="seconds")})
                 maybe_send_alert(session, "live_trading_enabled", {"telegram_alerts": telegram_alerts_for_ping},
                                   f"Live trading turned ON by {email}.")
                 st.success("Live trading enabled.")

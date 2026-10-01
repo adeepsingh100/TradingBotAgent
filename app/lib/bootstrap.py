@@ -29,6 +29,11 @@ _SECRETS_PATHS = (Path.home() / ".streamlit" / "secrets.toml", Path.cwd() / ".st
 
 
 def ensure_env_from_secrets() -> None:
+    # Dashboard-only: libpq reads PGTZ at connect time, so every TIMESTAMPTZ
+    # comes back as an IST-aware datetime and every page displays IST without
+    # per-column conversion. Set before core.db.session builds its engine. The
+    # worker never runs this, so its DB sessions stay on the server default.
+    os.environ.setdefault("PGTZ", "Asia/Kolkata")
     if not any(p.exists() for p in _SECRETS_PATHS):
         return  # local dev -- core.config.Settings reads .env directly instead
 
