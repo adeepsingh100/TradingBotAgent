@@ -198,7 +198,10 @@ with get_session() as session:
     st.divider()
 
     # --- Watchlist ---
-    st.subheader("Watchlist")
+    st.subheader("Fallback watchlist")
+    st.caption("Paper wallets pick their own coins every tick: top INR pairs by 24h volume, skipping stablecoins, "
+               "wide spreads and 24h pumps (core/universe.py). This list is used only if CoinDCX's ticker is down. "
+               "Live wallets still trade only `watchlist_live`.")
     _, watchlist = _setting(session, "watchlist", [])
     with st.form("watchlist_form"):
         watchlist_text = st.text_input("Comma-separated INR spot symbols (e.g. BTCINR,ETHINR,SOLINR)", value=",".join(watchlist))

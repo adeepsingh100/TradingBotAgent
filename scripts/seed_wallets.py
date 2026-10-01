@@ -11,6 +11,7 @@ from __future__ import annotations
 from core.config import settings as env
 from core.db.models import Agent, Setting, Wallet
 from core.db.session import get_session
+from core.universe import DEFAULT_UNIVERSE
 
 DEFAULT_WALLETS = [
     ("small", env.wallet_small_starting_capital),
@@ -46,6 +47,9 @@ DEFAULT_SETTINGS = {
         # per-trade fee CoinDCX charges is fee_pct * (1 + gst_pct/100).
         "gst_pct": 18.0,
     },
+    # Paper wallets pick their own pairs every tick from the live ticker
+    # (core/universe.py); `watchlist` is only the fallback if that call fails.
+    "universe": DEFAULT_UNIVERSE,
     "watchlist": ["BTCINR", "ETHINR", "SOLINR"],
     # Live wallets never trade paper's full watchlist or risk profile --
     # v1 is deliberately one pair, tighter caps (Phase 7 report). Falls back

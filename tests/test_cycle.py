@@ -11,6 +11,8 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
+import pytest
+
 from core.db.models import (
     Agent, ControlCommand, Decision, EquityHistory, Heartbeat, LiveOrder, MarketCache, Position, Setting, Strategy,
     Trade, Wallet,
@@ -19,6 +21,29 @@ from tests.conftest import FakeSession
 from worker import cycle
 
 RISK = {"consecutive_losses_trigger": 2, "cooldown_hours_after_losses": 4}
+
+
+@pytest.fixture(autouse=True)
+def _no_live_ticker(monkeypatch):
+    """run_cycle picks paper pairs from the live ticker -- make it fail so
+    these tests stay offline and fall back to the `watchlist` setting."""
+    def boom():
+        raise RuntimeError("no network in tests")
+    monkeypatch.setattr(cycle.coindcx_client, "get_ticker", boom)
+
+
+# --- _auto_watchlist ---
+
+
+def test_auto_watchlist_uses_ticker_ranking(monkeypatch):
+    monkeypatch.setattr(cycle.coindcx_client, "get_ticker", lambda: [
+        {"market": "ETHINR", "volume": "9000000", "last_price": "100", "bid": "99.9", "ask": "100", "change_24_hour": "1"},
+    ])
+    assert cycle._auto_watchlist({}, ["BTCINR"]) == ["ETHINR"]
+
+
+def test_auto_watchlist_falls_back_when_ticker_fails():
+    assert cycle._auto_watchlist({}, ["BTCINR"]) == ["BTCINR"]
 
 
 def _wallet(**kw):
@@ -294,3 +319,35 @@ def test_run_cycle_ticks_every_alive_agent_and_beats_heartbeat(monkeypatch):
 @contextmanager
 def _session_ctx(session):
     yield session
+
+
+def test_run_cycle_keeps_a_held_pair_that_fell_out_of_the_auto_watchlist(monkeypatch):
+    session = FakeSession()
+    wallet = _wallet()
+    agent = Agent(id=uuid.uuid4(), wallet_id=wallet.id, status="alive", mode="paper")
+    agent.wallet = wallet
+    session.add(agent)
+    for symbol in ("BTCINR", "XRPINR"):
+        session.add(MarketCache(pair=f"I-{symbol[:-3]}_INR", min_quantity=0, max_quantity=1, step=0.0001, min_notional=1,
+                                 base_precision=2, target_precision=4, raw={"symbol": symbol}))
+    session.add(Position(id=uuid.uuid4(), wallet_id=wallet.id, pair="XRPINR", side="buy", qty=1.0,
+                         entry_price=100.0, stop_loss=95.0, take_profit=110.0, closed_at=None))
+    monkeypatch.setattr(cycle.coindcx_client, "get_ticker", lambda: [
+        {"market": "BTCINR", "volume": "40000000", "last_price": "100", "bid": "99.9", "ask": "100", "change_24_hour": "1"},
+    ])
+    monkeypatch.setattr(cycle, "get_session", lambda: _session_ctx(session))
+    monkeypatch.setattr(cycle, "acquire_tick_lock", lambda session, holder: True)
+    monkeypatch.setattr(cycle, "get_llm", lambda *a, **kw: object())
+    monkeypatch.setattr(cycle, "_fetch_btc_price", lambda: None)
+    monkeypatch.setattr(cycle, "is_dead", lambda *a, **kw: False)
+    captured = {}
+
+    def fake_run_wallet_tick(session, wallet, agent, pair_map, *rest):
+        captured["watchlist"] = sorted(pair_map.keys())
+        return {"wallet": wallet.name, "equity": 1000.0, "prices": {}, "results": []}
+
+    monkeypatch.setattr(cycle, "_run_wallet_tick", fake_run_wallet_tick)
+
+    cycle.run_cycle()
+
+    assert captured["watchlist"] == ["BTCINR", "XRPINR"]  # top-N pick + the pair it still holds

@@ -28,6 +28,7 @@ from core.llm.provider import get_llm
 from core.lock import acquire_tick_lock
 from core.paper_engine import equity, get_open_positions, is_dead, kill_wallet
 from core.risk_manager import consecutive_losses
+from core.universe import top_inr_symbols
 
 from .agent.graph import build_graph
 
@@ -100,6 +101,16 @@ def _fetch_btc_price() -> float | None:
         return None
 
 
+def _auto_watchlist(universe_cfg: dict, fallback: list[str]) -> list[str]:
+    """Paper wallets' pairs for this tick, picked from the live ticker
+    (core/universe.py). Falls back to the `watchlist` setting only if the
+    ticker call fails or nothing survives the filters."""
+    try:
+        return top_inr_symbols(coindcx_client.get_ticker(), universe_cfg) or fallback
+    except Exception:  # noqa: BLE001 -- ticker outage degrades to the fallback list, never crashes the tick
+        return fallback
+
+
 def _wallet_risk_state(session, wallet, risk: dict) -> dict:
     all_trades = session.query(Trade).filter_by(wallet_id=wallet.id).all()
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -161,7 +172,9 @@ def run_cycle(holder: str = "worker") -> dict:
         # until a human has actually configured settings["risk_live"].
         risk_live = settings_map.get("risk_live", risk)
         costs = settings_map.get("costs", {})
-        watchlist = settings_map.get("watchlist", [])
+        # Paper wallets find their own coins each tick; `watchlist` is only the
+        # fallback if the ticker is down. Live stays on its hand-picked list.
+        watchlist = _auto_watchlist(settings_map.get("universe", {}), settings_map.get("watchlist", []))
         watchlist_live = settings_map.get("watchlist_live", ["BTCINR"])  # v1: one pair, most liquid, least slippage surprise
         llm_settings = settings_map.get("llm", {})
         global_settings = settings_map.get("global", {})
@@ -191,7 +204,10 @@ def run_cycle(holder: str = "worker") -> dict:
             wallet = agent.wallet
             is_live = wallet.kind == "live"
 
-            wallet_watchlist = watchlist_live if is_live else watchlist
+            # Always include pairs this wallet already holds -- a coin that drops
+            # out of the top-N must still get its stop/target checked every tick.
+            held = [p.pair for p in get_open_positions(session, wallet.id)]
+            wallet_watchlist = list(dict.fromkeys((watchlist_live if is_live else watchlist) + held))
             wallet_risk = risk_live if is_live else risk
             wallet_strategies = live_strategies if is_live else strategies
             pair_map = _pair_map(session, wallet_watchlist)
