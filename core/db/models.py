@@ -35,7 +35,7 @@ from __future__ import annotations
 import uuid
 from datetime import datetime
 
-from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Integer, String, Text, UniqueConstraint
+from sqlalchemy import JSON, Boolean, DateTime, Float, ForeignKey, Index, Integer, String, Text, UniqueConstraint, text
 from sqlalchemy.dialects.postgresql import UUID
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 
@@ -146,9 +146,12 @@ class Decision(Base):
 
 
 class Position(Base):
-    """Currently-open positions only -- closed when the matching exit
-    `Trade` row is written; history of the position itself lives in the
-    trade rows (entry fill + exit fill), not here."""
+    """Every position ever opened, open or closed -- NOT deleted on
+    close (`closed_at` marks that instead). First design was
+    delete-on-close; a real DB caught the flaw immediately: trades.
+    position_id's FK means the entry+exit Trade rows still reference
+    this row forever, so deleting it is a foreign-key violation, not a
+    cleanup. "Open positions" is `WHERE closed_at IS NULL`."""
 
     __tablename__ = "positions"
 
@@ -163,11 +166,15 @@ class Position(Base):
     strategy_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("strategies.id"))
     decision_id: Mapped[uuid.UUID | None] = mapped_column(ForeignKey("decisions.id"))
     opened_at: Mapped[datetime] = _created_at()
+    closed_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
 
-    __table_args__ = (UniqueConstraint("wallet_id", "pair", name="positions_wallet_pair_key"),)
-    # max_open_positions is a risk_manager count check, not a DB constraint --
-    # this unique constraint only blocks two simultaneous positions in the
-    # SAME pair for the SAME wallet, which is a separate, always-true rule.
+    __table_args__ = (
+        # Partial index, not a plain UniqueConstraint -- a closed
+        # position must not block opening a new one in the same pair
+        # later. max_open_positions is a separate risk_manager count
+        # check, not enforced here.
+        Index("positions_wallet_pair_open_key", "wallet_id", "pair", unique=True, postgresql_where=text("closed_at IS NULL")),
+    )
 
 
 class Trade(Base):

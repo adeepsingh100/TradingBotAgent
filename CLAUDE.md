@@ -89,6 +89,19 @@ reintroduced:
   cert file (`~/.postgresql/root.crt`) that none of this app's runtimes
   (Render, local dev) have by default.
 
+### Position lifecycle (not a CockroachDB quirk -- plain relational design)
+
+`positions` rows are never deleted, open or closed -- `closed_at IS
+NULL` means open. The first design deleted a position on close; a real
+DB (any Postgres-family one, not CockroachDB-specific) rejected that
+immediately as a foreign-key violation, since `trades.position_id`
+still points at it (both the entry and exit `Trade` rows need that
+link to survive). The uniqueness rule "no two simultaneously-open
+positions in the same pair for the same wallet" is a **partial** unique
+index (`positions_wallet_pair_open_key`, `WHERE closed_at IS NULL`),
+not a plain `UniqueConstraint` -- a plain one would permanently block
+re-entering a pair after the first position in it ever closed.
+
 ## Commands
 
 ```bash
@@ -135,8 +148,18 @@ summarize, wait for go-ahead before the next:
   otherwise -- see README's "Known risks". `create_order` is
   implemented and tested but hard-locked to a DRY_RUN preview
   (`client.ALLOW_LIVE_ORDERS = False`) until Phase 7.
-- [ ] Phase 3 -- fee/tax model, paper engine (multi-wallet), risk
-  manager, benchmarks + tests.
+- [x] **Phase 3** -- fee/TDS/slippage model, multi-wallet paper engine,
+  risk manager, buy-and-hold-BTC/cash benchmarks. 42 tests passing.
+  Verified live: opened/closed a real-priced throwaway position against
+  the real DB (rolled back after), confirming cash/pnl/TDS math and the
+  closed_at lifecycle; separately confirmed the partial unique index
+  both blocks a duplicate open in the same pair AND allows re-entering
+  that pair after the first position closed. **Found and fixed a real
+  design bug this way** -- see CLAUDE.md's "Position lifecycle" note
+  above (migration 0002). Equity excludes `tds_credit` per spec section
+  8's literal wording (shown separately, not folded into the
+  death-threshold number) -- this corrects what I'd floated to the user
+  earlier as an open question; the spec already answers it.
 - [ ] Phase 4 -- strategy library + backtester + tests.
 - [ ] Phase 5 -- LangGraph agent with ChatNVIDIA, FastAPI worker,
   lock, heartbeat, `run_local.py`, LLM call logging, Telegram alerts.
