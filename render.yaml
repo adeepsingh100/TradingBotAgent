@@ -1,0 +1,36 @@
+services:
+  - type: web
+    name: survivor-worker
+    runtime: python
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: uvicorn worker.app:app --host 0.0.0.0 --port $PORT
+    envVars:
+      - key: DATABASE_URL
+        sync: false
+      - key: TICK_TOKEN
+        sync: false
+      - key: LLM_PROVIDER
+        value: nvidia
+      - key: LLM_MODEL
+        value: nvidia/nemotron-3-super-120b-a12b
+      - key: NVIDIA_API_KEY
+        sync: false
+      - key: ANTHROPIC_API_KEY
+        sync: false
+      - key: OPENAI_API_KEY
+        sync: false
+      - key: COINDCX_API_KEY
+        sync: false
+      - key: COINDCX_API_SECRET
+        sync: false
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: TELEGRAM_CHAT_ID
+        sync: false
+      - key: WALLET_SMALL_STARTING_CAPITAL
+        value: "1000"
+      - key: WALLET_LARGE_STARTING_CAPITAL
+        value: "5000"
+      - key: DEATH_THRESHOLD_PCT
+        value: "20"

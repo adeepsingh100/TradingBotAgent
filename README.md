@@ -92,13 +92,21 @@ curl -X POST localhost:8000/tick -H "X-Tick-Token: $TICK_TOKEN"
 
 ### Worker to Render
 
-Create a Render **Web Service** from this repo: build command
+`render.yaml` at the repo root is a Blueprint -- in the Render
+dashboard: New -> Blueprint -> connect this GitHub repo -> it
+auto-detects `render.yaml` and creates the `survivor-worker` web
+service with the right build/start commands. You'll be prompted to
+fill in the `sync: false` secrets (`DATABASE_URL`, `TICK_TOKEN`,
+`NVIDIA_API_KEY`, `COINDCX_API_KEY`, `COINDCX_API_SECRET`,
+`TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID`; `ANTHROPIC_API_KEY`/
+`OPENAI_API_KEY` only if you're actually using those providers).
+
+No Blueprint -> manual **Web Service**: build command
 `pip install -r requirements.txt`, start command
-`uvicorn worker.app:app --host 0.0.0.0 --port $PORT`. Set
-`DATABASE_URL`, `TICK_TOKEN`, `NVIDIA_API_KEY`, `COINDCX_API_KEY`,
-`COINDCX_API_SECRET`, `TELEGRAM_BOT_TOKEN`, `TELEGRAM_CHAT_ID` as
-Render env vars (same names as `.env`). Render free-tier web services
-sleep when idle -- that's fine, cron-job.org's hit on `/tick` wakes it.
+`uvicorn worker.app:app --host 0.0.0.0 --port $PORT`, same env vars.
+
+Render free-tier web services sleep when idle -- that's fine,
+cron-job.org's hit on `/tick` wakes it.
 
 ### cron-job.org
 
