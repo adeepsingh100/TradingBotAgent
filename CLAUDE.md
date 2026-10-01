@@ -104,6 +104,10 @@ uv pip install -r requirements.txt
 .venv/bin/python -m scripts.check_db_connection
 .venv/bin/python -m scripts.seed_wallets
 
+# refresh market_cache (run once daily in production -- Phase 5's
+# worker will do this itself; manual for now)
+.venv/bin/python -c "from core.coindcx.market_cache import refresh_market_cache; print(refresh_market_cache())"
+
 # worker (Phase 5+)
 .venv/bin/python -m worker.run_local
 
@@ -117,11 +121,20 @@ Build phases, per the original spec (section 16) -- stop after each,
 summarize, wait for go-ahead before the next:
 
 - [x] **Phase 1** -- project skeleton, config/settings split, DB models
-  (18 tables), Alembic initial migration, connection-check script,
-  schema sanity test. **Not yet run against a real cluster** -- no
-  CockroachDB connection string provided for this project yet.
-- [ ] Phase 2 -- CoinDCX public client + market details cache + private
-  client in DRY_RUN + tests.
+  (18 tables), Alembic migration. Verified against the real cluster: a
+  dedicated `survivor` database (isolated from AI-Trader's `defaultdb`
+  on the same CockroachDB cluster), migration applied, wallets/agents/
+  settings seeded and read back correctly.
+- [x] **Phase 2** -- CoinDCX public + private (signed) client,
+  `market_cache` refresh + rounding helpers. Verified live against the
+  real API with real credentials: signing works (a real balances call
+  succeeded), `get_candles` returns real OHLCV, `refresh_market_cache`
+  cached all 339 real INR spot pairs into the real DB. **Finding**:
+  live `markets_details` shows zero INR spot pairs support
+  `stop_limit`/`take_profit_limit` despite the docs example suggesting
+  otherwise -- see README's "Known risks". `create_order` is
+  implemented and tested but hard-locked to a DRY_RUN preview
+  (`client.ALLOW_LIVE_ORDERS = False`) until Phase 7.
 - [ ] Phase 3 -- fee/tax model, paper engine (multi-wallet), risk
   manager, benchmarks + tests.
 - [ ] Phase 4 -- strategy library + backtester + tests.

@@ -83,6 +83,18 @@ in `.env`/Render env vars, not a code change.
 
 ## Known risks
 
+- **No on-exchange stop-loss for spot, in practice.** The API schema
+  allows `stop_limit`/`take_profit_limit` order types, and docs.coindcx.com's
+  example response shows them -- but a live query against **all 339**
+  real INR spot pairs (2026-10-01) found **zero** that actually offer
+  anything beyond `limit_order`/`market_order` (see
+  `core/coindcx/client.py`'s module docstring). Spec section 10 asked
+  to flag this if it turned out to be true: the live engine (Phase 7+)
+  cannot place an exchange-side stop and must simulate one by polling
+  and submitting a market/limit sell when the stop level is crossed --
+  a real gap window exists between the price crossing the stop and the
+  bot's next tick actually firing the sell. Re-check `order_types` on
+  the pairs you actually trade before going live; this could change.
 - **CoinDCX fee %**: this repo's default fee-rate seed values
   (`scripts/seed_wallets.py::DEFAULT_SETTINGS["costs"]`) are UNVERIFIED
   against an official CoinDCX source -- their fee pages blocked
