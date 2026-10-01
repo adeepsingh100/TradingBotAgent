@@ -7,6 +7,7 @@ from sqlalchemy import engine_from_config, pool
 
 from core.config import settings
 from core.db.models import Base
+from core.db.session import _cockroachdb_url
 
 config = context.config
 if config.config_file_name is not None:
@@ -14,7 +15,7 @@ if config.config_file_name is not None:
 
 target_metadata = Base.metadata
 
-config.set_main_option("sqlalchemy.url", settings.database_url)
+config.set_main_option("sqlalchemy.url", _cockroachdb_url(settings.database_url))
 
 
 def run_migrations_offline() -> None:

@@ -23,7 +23,23 @@ from core.config import settings
 
 _T = TypeVar("_T")
 
-engine = create_engine(settings.database_url, pool_pre_ping=True)
+
+def _cockroachdb_url(raw: str) -> str:
+    """Cockroach Cloud's console always hands out a `postgresql://`
+    connection string -- plain SQLAlchemy's postgresql+psycopg2 dialect
+    tries to parse `select version()`'s output assuming it's Postgres-
+    shaped and crashes on CockroachDB's own version string
+    ("CockroachDB CCL v26.2.7 (...)"). `sqlalchemy-cockroachdb` (already
+    a dependency) registers a `cockroachdb` dialect that handles this --
+    swap the scheme rather than ask every deployment target to remember
+    to edit the URL Cockroach Cloud gave them."""
+    for prefix in ("postgresql://", "postgres://"):
+        if raw.startswith(prefix):
+            return "cockroachdb://" + raw[len(prefix):]
+    return raw
+
+
+engine = create_engine(_cockroachdb_url(settings.database_url), pool_pre_ping=True)
 SessionLocal = sessionmaker(bind=engine, expire_on_commit=False)
 
 
