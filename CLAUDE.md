@@ -160,7 +160,23 @@ summarize, wait for go-ahead before the next:
   8's literal wording (shown separately, not folded into the
   death-threshold number) -- this corrects what I'd floated to the user
   earlier as an open question; the spec already answers it.
-- [ ] Phase 4 -- strategy library + backtester + tests.
+- [x] **Phase 4** -- 5 rule-based strategies (`core/strategies/`:
+  ema_crossover, rsi_mean_reversion, bollinger_reversion, atr_trend,
+  volume_breakout), each a Pydantic `Params` class (bounds = spec
+  section 5's "safe min/max ranges") + a pure `generate_signal`, all
+  reached only through `core/strategies/registry.py`. `core/
+  backtester.py` replays one candle at a time with no look-ahead,
+  through the same fee/slippage/TDS model as the paper engine.
+  `core/promotion.py`: two separate gates (loose backtest bar,
+  strict spec-section-5 live-promotion criteria). 77 tests passing.
+  Verified live: seeded the 5 strategies as real `draft` rows, ran
+  real backtests against 500 real 1h BTC_INR candles for all five
+  (`scripts/seed_strategies.py`) -- none of the UN-TUNED defaults
+  cleared the backtest bar on this window (net_pnl ranged -2 to -148),
+  a realistic result, not a bug -- real tuning is the LLM's Phase 5
+  job. All 5 real `backtests` rows persisted (this one wasn't rolled
+  back, unlike Phase 3's throwaway-wallet check -- these ARE the real
+  first backtest history, not a disposable test).
 - [ ] Phase 5 -- LangGraph agent with ChatNVIDIA, FastAPI worker,
   lock, heartbeat, `run_local.py`, LLM call logging, Telegram alerts.
 - [ ] Phase 6 -- Streamlit dashboard with Firebase auth, all pages,

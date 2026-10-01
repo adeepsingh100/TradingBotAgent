@@ -43,6 +43,26 @@ DEFAULT_SETTINGS = {
         "slippage_pct": 0.1,
     },
     "watchlist": ["BTCINR", "ETHINR", "SOLINR"],
+    "promotion": {
+        # Loose bar: draft -> backtested is "worth trying in paper",
+        # not "worth real money" -- core/promotion.py::clears_backtest_bar.
+        "backtest_bar": {
+            "min_trades": 5,
+            "min_net_pnl": 0,
+            "min_profit_factor": 1.0,
+            "max_drawdown_pct": 25,
+        },
+        # Strict bar, spec section 5's exact numbers --
+        # core/promotion.py::clears_live_promotion. Clearing this still
+        # requires manual approval in the UI either way (spec section 5:
+        # require_human_approval_for_live, not changeable from the UI).
+        "live_criteria": {
+            "min_trades": 20,
+            "min_days": 14,
+            "min_profit_factor": 1.2,
+            "max_drawdown_pct": 15,
+        },
+    },
     "llm": {"provider": env.llm_provider, "model": env.llm_model},
     "telegram_alerts": {
         "trade_executed": True,
