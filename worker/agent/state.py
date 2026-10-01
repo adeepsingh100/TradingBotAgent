@@ -30,6 +30,7 @@ class AgentState(TypedDict, total=False):
     daily_pnl_pct: float
     cooldown_until: Any
     kill_switch: bool
+    death_threshold_pct: float  # equity below starting_capital * this % kills the wallet
     llm: Any
     llm_provider: str
     llm_model: str

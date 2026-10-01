@@ -120,7 +120,7 @@ def _wallet_risk_state(session, wallet, risk: dict) -> dict:
 
 def _run_wallet_tick(
     session, wallet, agent, pair_map, market_cache, strategies, risk, costs, global_settings,
-    live_trading_enabled, llm, llm_settings,
+    live_trading_enabled, llm, llm_settings, death_threshold_pct,
 ) -> dict:
     open_positions = get_open_positions(session, wallet.id)
     risk_state = _wallet_risk_state(session, wallet, risk)
@@ -133,6 +133,7 @@ def _run_wallet_tick(
         "risk_settings": risk, "costs_settings": costs,
         "equity": 0.0,  # overwritten by check_exits once prices are loaded
         "kill_switch": global_settings.get("kill_switch", False),
+        "death_threshold_pct": death_threshold_pct,
         "llm": llm, "llm_provider": llm_settings.get("provider", "nvidia"), "llm_model": llm_settings.get("model", ""),
         "candles": {}, "prices": {}, "strategy_assignment": {}, "signals": {}, "proposals": {}, "results": [],
         **risk_state,
@@ -204,7 +205,7 @@ def run_cycle(holder: str = "worker") -> dict:
 
             summary = _run_wallet_tick(
                 session, wallet, agent, pair_map, market_cache, wallet_strategies, wallet_risk, costs,
-                global_settings, live_trading_enabled, llm, llm_settings,
+                global_settings, live_trading_enabled, llm, llm_settings, death_threshold_pct,
             )
             wallet_summaries.append(summary)
 

@@ -84,6 +84,28 @@ def check_exits(state: dict) -> dict:
     return {"open_positions": remaining, "equity": current_equity}
 
 
+def _survival_brief(state: dict) -> str:
+    """Opening lines of every LLM prompt: how much money is left, where
+    death is, and that hold is a valid way to survive -- so the model
+    weighs each trade against its own survival, not just the signal."""
+    wallet = state["wallet"]
+    start = wallet.starting_capital
+    eq = state["equity"]
+    death_line = start * state.get("death_threshold_pct", 0.0) / 100
+    pnl_pct = (eq - start) / start * 100 if start else 0.0
+    return (
+        "You are Survivor, an autonomous crypto trading agent on CoinDCX (INR spot). "
+        "You started with a fixed amount of money and must make money to stay alive.\n"
+        f"Started with {start:.2f} INR. You now have {eq:.2f} INR ({pnl_pct:+.2f}%), "
+        f"of which {wallet.current_cash:.2f} INR is cash. Open positions: {len(state.get('open_positions', []))}. "
+        f"Today's P&L: {state.get('daily_pnl_pct', 0.0):+.2f}%.\n"
+        f"If your equity falls below {death_line:.2f} INR you die permanently -- "
+        f"you are {eq - death_line:.2f} INR away from death.\n"
+        "Every trade costs fees, TDS and slippage, so only take trades whose edge clearly beats those costs. "
+        "A bad trade brings death closer; holding cash is always a valid way to survive.\n\n"
+    )
+
+
 def strategize(state: dict) -> dict:
     """One LLM call per wallet per tick (not per pair) -- picks which
     strategy TYPE best fits each candidate pair's current conditions.
@@ -108,7 +130,7 @@ def strategize(state: dict) -> dict:
         return {"strategy_assignment": {}}
 
     strategy_types = sorted(state["strategies"].keys())
-    prompt = (
+    prompt = _survival_brief(state) + (
         "Choose ONE trading strategy type per pair for this tick, based on its recent trend/volatility.\n"
         f"Available strategy types: {strategy_types}\n"
         "Recent market context:\n" + "\n".join(context_lines) + "\n"
@@ -153,7 +175,7 @@ def decide(state: dict) -> dict:
             proposals[symbol] = None
             continue
         price = state["prices"][symbol]
-        prompt = (
+        prompt = _survival_brief(state) + (
             f"Strategy '{strategy.type}' generated a BUY signal for {symbol} at price {price}.\n"
             f"Proposed stop_loss={signal.stop_loss}, take_profit={signal.take_profit}.\n"
             f"Strategy reasoning: {signal.reasoning}\n"

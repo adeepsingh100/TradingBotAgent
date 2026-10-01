@@ -159,19 +159,27 @@ def test_strategize_skips_pairs_already_open():
 def test_strategize_builds_assignment_from_llm_output(monkeypatch):
     session = FakeSession()
     wallet = _wallet()
-    monkeypatch.setattr(
-        nodes, "call_structured",
-        lambda *a, **kw: StrategizeOutput(assignments=[StrategyAssignment(pair="BTCINR", strategy_type="ema_crossover")]),
-    )
+    sent = {}
+
+    def fake_call(session, llm, schema, messages, **kw):
+        sent["prompt"] = messages[0]["content"]
+        return StrategizeOutput(assignments=[StrategyAssignment(pair="BTCINR", strategy_type="ema_crossover")])
+
+    monkeypatch.setattr(nodes, "call_structured", fake_call)
     state = {
         "session": session, "wallet": wallet, "open_positions": [], "watchlist": ["BTCINR"], "llm": object(),
         "candles": {"BTCINR": make_candles([100.0 + i for i in range(25)])},
         "strategies": {"ema_crossover": _strategy()}, "llm_provider": "nvidia", "llm_model": "m",
+        "equity": 800.0, "death_threshold_pct": 50.0,
     }
 
     result = nodes.strategize(state)
 
     assert result["strategy_assignment"] == {"BTCINR": "ema_crossover"}
+    # Survival brief: money left and distance to death (1000 * 50% = 500 death line).
+    assert "You now have 800.00 INR (-20.00%)" in sent["prompt"]
+    assert "below 500.00 INR you die" in sent["prompt"]
+    assert "300.00 INR away from death" in sent["prompt"]
 
 
 # --- generate_mechanical_signals ---
