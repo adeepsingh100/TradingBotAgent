@@ -20,9 +20,19 @@ import plotly.graph_objects as go
 from streamlit_autorefresh import st_autorefresh
 
 from app.lib.queries import list_wallets
+from core.coindcx.client import get_ticker
 from core.db.models import EquityHistory, Heartbeat, Position
 from core.db.session import get_session
 st_autorefresh(interval=60_000, key="home_autorefresh")
+
+
+@st.cache_data(ttl=60)  # one public ticker call per minute, same cadence as the autorefresh
+def _live_prices() -> dict[str, float]:
+    try:
+        return {r["market"]: float(r["last_price"]) for r in get_ticker() if r.get("last_price")}
+    except Exception:  # noqa: BLE001 -- a ticker outage blanks the price columns, never breaks the page
+        return {}
+
 
 st.title("Survivor")
 
@@ -77,12 +87,22 @@ with get_session() as session:
 
     st.subheader("Open positions")
     if open_positions:
-        st.dataframe([
-            {
-                "Pair": p.pair, "Qty": p.qty, "Entry": p.entry_price,
+        prices = _live_prices()
+        if not prices:
+            st.caption("Live prices unavailable right now (CoinDCX ticker unreachable).")
+        rows = []
+        for p in open_positions:
+            price = prices.get(p.pair)
+            cost = p.qty * p.entry_price
+            value = p.qty * price if price is not None else None
+            rows.append({
+                "Pair": p.pair, "Qty": p.qty, "Entry": p.entry_price, "Current price": price,
+                "Cost (₹)": round(cost, 2), "Value now (₹)": round(value, 2) if value is not None else None,
+                "P&L (₹)": round(value - cost, 2) if value is not None else None,
+                "P&L %": round((value - cost) / cost * 100, 2) if value is not None and cost else None,
                 "Stop loss": p.stop_loss, "Take profit": p.take_profit, "Opened at": p.opened_at,
-            }
-            for p in open_positions
-        ], use_container_width=True)
+            })
+        st.dataframe(rows, use_container_width=True)
+        st.caption("Value now = qty × live price, before exit fee, TDS and slippage.")
     else:
         st.caption("No open positions.")
