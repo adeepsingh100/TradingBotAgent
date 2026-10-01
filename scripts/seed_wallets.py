@@ -1,0 +1,98 @@
+"""One-time bootstrap: the two default paper wallets + their agents,
+and the `settings` table's starting values for every knob the
+dashboard's Controls & Settings page can later change live.
+
+Run manually after migrations: python -m scripts.seed_wallets
+Safe to re-run -- skips anything that already exists by name/key.
+"""
+
+from __future__ import annotations
+
+from core.config import settings as env
+from core.db.models import Agent, Setting, Wallet
+from core.db.session import get_session
+
+DEFAULT_WALLETS = [
+    ("small", env.wallet_small_starting_capital),
+    ("large", env.wallet_large_starting_capital),
+]
+
+# Every value here is a *default*, not a constant -- the dashboard's
+# Controls & Settings page edits these rows live, and the worker reads
+# them fresh every tick (spec section 3). core/config.py only holds
+# what can't safely live in a dashboard-editable table (secrets, DB URL).
+DEFAULT_SETTINGS = {
+    "risk": {
+        "max_position_size_pct": 20,
+        "max_risk_per_trade_pct": 3,
+        "daily_loss_limit_pct": 8,
+        "max_open_positions": 2,
+        "max_trades_per_day": 4,
+        "min_reward_to_cost_multiple": 1.5,
+        "min_confidence": 0.6,
+        "cooldown_hours_after_losses": 4,
+        "consecutive_losses_trigger": 3,
+    },
+    "costs": {
+        # Base-tier spot %, UNVERIFIED against an official CoinDCX source
+        # (coindcx.com/fees 403'd the verification pass) -- confirm from
+        # your account's own Fees page and correct here before going live.
+        "maker_fee_pct": 0.2,
+        "taker_fee_pct": 0.2,
+        "tds_pct": 1.0,
+        "slippage_pct": 0.1,
+    },
+    "watchlist": ["BTCINR", "ETHINR", "SOLINR"],
+    "llm": {"provider": env.llm_provider, "model": env.llm_model},
+    "telegram_alerts": {
+        "trade_executed": True,
+        "strategy_ready_for_live": True,
+        "daily_loss_limit_hit": True,
+        "cooldown_triggered": True,
+        "heartbeat_missing": True,
+        "repeated_llm_failures": True,
+        "agent_died": True,
+        "daily_summary": True,
+    },
+    "global": {
+        "kill_switch": False,
+        "mode": "paper",
+        # Hard-enforced in code regardless of this value (spec section 5)
+        # -- stored for visibility in the UI, not as the actual gate.
+        "require_human_approval_for_live": True,
+    },
+    "death_threshold_pct": env.death_threshold_pct,
+}
+
+
+def _seed_wallet(session, name: str, starting_capital: float) -> None:
+    existing = session.query(Wallet).filter_by(name=name).one_or_none()
+    if existing is not None:
+        print(f"wallet '{name}' already exists, skipping")
+        return
+    wallet = Wallet(name=name, kind="paper", starting_capital=starting_capital, current_cash=starting_capital)
+    session.add(wallet)
+    session.flush()
+    session.add(Agent(wallet_id=wallet.id, status="alive", mode="paper"))
+    print(f"seeded wallet '{name}' (capital={starting_capital}) + its agent")
+
+
+def _seed_settings(session) -> None:
+    for key, value in DEFAULT_SETTINGS.items():
+        existing = session.query(Setting).filter_by(key=key).one_or_none()
+        if existing is not None:
+            print(f"setting '{key}' already exists, skipping")
+            continue
+        session.add(Setting(key=key, value=value))
+        print(f"seeded setting '{key}'")
+
+
+def main() -> None:
+    with get_session() as session:
+        for name, capital in DEFAULT_WALLETS:
+            _seed_wallet(session, name, capital)
+        _seed_settings(session)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,43 @@
+# --- Core / config ---
+pydantic==2.11.4
+pydantic-settings==2.8.1
+python-dotenv==1.0.1
+
+# --- DB (CockroachDB Serverless, Postgres wire protocol) ---
+SQLAlchemy==2.0.36
+sqlalchemy-cockroachdb==2.0.2
+psycopg2-binary==2.9.10
+alembic==1.14.0
+
+# --- Agent / LLM ---
+# langchain 1.x / langgraph 1.x -- my training data's remembered 0.3.x/
+# 0.2.x pins were flat incompatible with the live-verified
+# langchain-nvidia-ai-endpoints==1.4.3 (needs langchain-core>=1.4.7, a
+# full major version ahead of what memory would've guessed). Resolved
+# via a real `uv pip install` against live PyPI, then pinned exactly.
+langchain==1.4.3
+langchain-core==1.6.6
+langgraph==1.2.12
+langchain-nvidia-ai-endpoints==1.4.3   # live-verified, Phase 5 report
+langchain-cockroachdb==0.3.0            # live-verified, Phase 5 report -- LangGraph checkpointer for CockroachDB
+# langchain-anthropic / langchain-openai added when the provider factory's
+# non-default branch is actually exercised -- no point pinning an unused
+# provider's SDK in v1.
+
+# --- Exchange / HTTP ---
+requests==2.32.3
+
+# --- Worker ---
+fastapi==0.115.6
+uvicorn[standard]==0.34.0
+
+# --- Dashboard ---
+streamlit==1.41.1
+plotly==5.24.1
+streamlit-autorefresh==1.0.1
+
+# --- Auth ---
+firebase-admin==6.6.0
+
+# --- Testing ---
+pytest==8.3.4
