@@ -20,7 +20,7 @@ from core.alerts import maybe_send_alert
 from core.benchmarks import initialize_benchmarks, record_benchmark_tick
 from core.coindcx import client as coindcx_client
 from core.config import settings as env
-from core.db.models import Agent, MarketCache, Setting, Strategy, Trade
+from core.db.models import Agent, AgentMemory, ControlCommand, Decision, EquityHistory, MarketCache, Position, Setting, Strategy, Trade
 from core.db.session import get_session
 from core.heartbeat import beat
 from core.llm.provider import get_llm
@@ -32,6 +32,45 @@ from .agent.graph import build_graph
 
 _GRAPH = build_graph()
 _BTC_PAIR_CODE = "I-BTC_INR"
+
+
+def _apply_pending_resets(session) -> None:
+    """`control_commands` (core/db/models.py::ControlCommand) is used
+    for exactly one command this repo implements: `reset_wallet` --
+    the one dashboard action that isn't a plain field flip (pause/
+    resume write `agents.status` directly; the kill switch writes
+    `settings.global.kill_switch` directly -- both already re-read
+    fresh every tick with no queue needed). A reset wipes a wallet back
+    to its starting state: delete every row that references it (FK-safe
+    order: trades -> positions -> decisions -> equity_history ->
+    agent_memory), drop its benchmark seed so it re-initializes next
+    tick, restore cash/tds_credit, and revive its agent."""
+    pending = [c for c in session.query(ControlCommand).all() if c.status == "pending" and c.command == "reset_wallet"]
+    for command in pending:
+        wallet_id = command.wallet_id
+        for trade in session.query(Trade).filter_by(wallet_id=wallet_id).all():
+            session.delete(trade)
+        for position in session.query(Position).filter_by(wallet_id=wallet_id).all():
+            session.delete(position)
+        for decision in session.query(Decision).filter_by(wallet_id=wallet_id).all():
+            session.delete(decision)
+        for row in session.query(EquityHistory).filter_by(wallet_id=wallet_id).all():
+            session.delete(row)
+        for row in session.query(AgentMemory).filter_by(wallet_id=wallet_id).all():
+            session.delete(row)
+        benchmark_setting = session.query(Setting).filter_by(key=f"benchmark_btc:{wallet_id}").one_or_none()
+        if benchmark_setting is not None:
+            session.delete(benchmark_setting)
+
+        agent = session.query(Agent).filter_by(wallet_id=wallet_id).one()
+        wallet = agent.wallet
+        wallet.current_cash = wallet.starting_capital
+        wallet.tds_credit = 0.0
+        agent.status = "alive"
+        agent.died_at = None
+
+        command.status = "applied"
+        command.applied_at = datetime.now(timezone.utc)
 
 
 def _load_settings(session) -> dict:
@@ -101,6 +140,8 @@ def run_cycle(holder: str = "worker") -> dict:
         if not acquire_tick_lock(session, holder=holder):
             return {"skipped": "tick lock held by another run"}
 
+        _apply_pending_resets(session)
+
         settings_map = _load_settings(session)
         risk = settings_map.get("risk", {})
         costs = settings_map.get("costs", {})
@@ -138,6 +179,11 @@ def run_cycle(holder: str = "worker") -> dict:
 
             still_open = get_open_positions(session, wallet.id)
             current_equity = equity(wallet, still_open, summary["prices"])
+            session.add(EquityHistory(
+                wallet_id=wallet.id, series="agent", equity_inr=current_equity,
+                cash_inr=wallet.current_cash, holdings_value_inr=current_equity - wallet.current_cash,
+                tds_credit_inr=wallet.tds_credit, recorded_at=datetime.now(timezone.utc),
+            ))
             if is_dead(wallet, current_equity, death_threshold_pct):
                 kill_wallet(session, wallet, agent, still_open, summary["prices"], costs)
                 maybe_send_alert(

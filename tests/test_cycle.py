@@ -11,7 +11,7 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
-from core.db.models import Agent, Heartbeat, MarketCache, Trade, Wallet
+from core.db.models import Agent, ControlCommand, Decision, EquityHistory, Heartbeat, MarketCache, Position, Trade, Wallet
 from tests.conftest import FakeSession
 from worker import cycle
 
@@ -79,6 +79,50 @@ def test_wallet_risk_state_no_cooldown_after_a_recent_win():
     result = cycle._wallet_risk_state(session, wallet, RISK)
 
     assert result["cooldown_until"] is None
+
+
+# --- _apply_pending_resets ---
+
+
+def test_apply_pending_resets_wipes_the_wallet_and_marks_the_command_applied():
+    session = FakeSession()
+    wallet = _wallet(name="small", current_cash=1.0, starting_capital=1000.0)
+    agent = Agent(id=uuid.uuid4(), wallet_id=wallet.id, status="dead", mode="paper")
+    agent.wallet = wallet
+    session.add(agent)
+    position = Position(id=uuid.uuid4(), wallet_id=wallet.id, pair="BTCINR", side="buy", qty=1,
+                         entry_price=1, stop_loss=1, take_profit=1)
+    session.add(position)
+    session.add(Trade(wallet_id=wallet.id, position_id=position.id, pair="BTCINR", side="buy", qty=1, price=1, fee=0))
+    session.add(Decision(wallet_id=wallet.id, proposal={}, risk_verdict="hold", risk_reason=""))
+    session.add(EquityHistory(wallet_id=wallet.id, series="agent", equity_inr=1.0))
+    command = ControlCommand(id=uuid.uuid4(), wallet_id=wallet.id, command="reset_wallet", payload={}, status="pending")
+    session.add(command)
+
+    cycle._apply_pending_resets(session)
+
+    assert session.query(Trade).all() == []
+    assert session.query(Position).all() == []
+    assert session.query(Decision).all() == []
+    assert session.query(EquityHistory).all() == []
+    assert wallet.current_cash == 1000.0
+    assert agent.status == "alive"
+    assert agent.died_at is None
+    assert command.status == "applied"
+
+
+def test_apply_pending_resets_ignores_already_applied_commands():
+    session = FakeSession()
+    wallet = _wallet(name="small", current_cash=1.0, starting_capital=1000.0)
+    agent = Agent(id=uuid.uuid4(), wallet_id=wallet.id, status="dead", mode="paper")
+    agent.wallet = wallet
+    session.add(agent)
+    session.add(ControlCommand(id=uuid.uuid4(), wallet_id=wallet.id, command="reset_wallet", payload={}, status="applied"))
+
+    cycle._apply_pending_resets(session)
+
+    assert wallet.current_cash == 1.0  # untouched -- that command was already applied
+    assert agent.status == "dead"
 
 
 # --- run_cycle orchestration ---

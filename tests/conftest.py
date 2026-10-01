@@ -28,6 +28,11 @@ class _FakeQuery:
     def one_or_none(self):
         return self._items[0] if self._items else None
 
+    def one(self):
+        if len(self._items) != 1:
+            raise ValueError(f"expected exactly one row, got {len(self._items)}")
+        return self._items[0]
+
     def all(self):
         return list(self._items)
 

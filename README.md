@@ -31,7 +31,21 @@ calls still hit the real private API. Put the key and secret in `.env`.
 
 ### 4. Firebase project (dashboard login)
 
-Added in Phase 6 -- not needed yet.
+Create a Firebase project at [console.firebase.google.com](https://console.firebase.google.com),
+enable **Authentication -> Sign-in method -> Email/Password**, and add
+a user for each dashboard operator. You need two separate credentials:
+- **Web API key** (Project settings -> General -> Web API Key) ->
+  `.env`'s `FIREBASE_WEB_API_KEY` -- used for the REST sign-in call.
+- **Service account JSON** (Project settings -> Service accounts ->
+  Generate new private key) -> the whole file's contents, minified to
+  one line, as `.env`'s `FIREBASE_SERVICE_ACCOUNT_JSON` -- used by
+  `firebase-admin` to verify the ID token server-side. Never commit
+  this file or paste its contents anywhere other than `.env`/Streamlit
+  Cloud's Secrets panel.
+
+Then set `ALLOWED_EMAILS` to a comma-separated list of the operator
+emails who may sign in -- a verified Firebase user whose email isn't
+on this list still can't open Controls & Settings (`app/lib/auth.py`).
 
 ### 5. Telegram bot
 
@@ -69,7 +83,10 @@ curl -X POST localhost:8000/tick -H "X-Tick-Token: $TICK_TOKEN"
 .venv/bin/python -m worker.run_local
 ```
 
-Dashboard: added Phase 6.
+```bash
+# dashboard
+.venv/bin/streamlit run app/Home.py
+```
 
 ## Deploying
 
@@ -93,7 +110,16 @@ not a double-tick).
 
 ### Dashboard to Streamlit Community Cloud
 
-Added Phase 6.
+Create an app at [share.streamlit.io](https://share.streamlit.io) pointed
+at this repo, main file path `app/Home.py`. In the app's Settings ->
+Secrets, paste `app/.streamlit/secrets.toml.example`'s keys filled in
+(`DATABASE_URL`, `FIREBASE_WEB_API_KEY`, `FIREBASE_SERVICE_ACCOUNT_JSON`,
+`ALLOWED_EMAILS`) -- `app/lib/bootstrap.py::ensure_env_from_secrets`
+copies these into the process env before any `core.*` import, which is
+what lets `core/config.py` work unmodified whether it's reading `.env`
+locally or Streamlit secrets in the cloud. Only these four keys are
+needed -- the dashboard never calls the LLM or CoinDCX directly, so it
+needs none of the worker's other secrets.
 
 ## Switching LLM providers
 

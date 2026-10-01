@@ -36,8 +36,11 @@ in-memory state:
   agent itself lives under `worker/agent/` (`state.py`, `nodes.py`,
   `graph.py`, `schemas.py`) -- worker-specific, not shared with `app/`,
   since the dashboard never runs agent logic.
-- **app/** -- Streamlit dashboard. Reads the DB, writes control
-  commands/settings rows. NEVER runs agent logic or places trades.
+- **app/** -- Streamlit dashboard (`app/Home.py` + `app/pages/`, shared
+  helpers in `app/lib/`). Reads the DB, writes `settings`/`agents`
+  rows directly for simple field flips and `control_commands` rows for
+  the one action that isn't one (`reset_wallet` -- see below). NEVER
+  runs agent logic or places trades.
 
 ### The config / settings split (read this before adding a new tunable)
 
@@ -53,6 +56,18 @@ watchlist, LLM provider/model, Telegram alert toggles) lives in the
 seeded with defaults by `scripts/seed_wallets.py::DEFAULT_SETTINGS`.
 The worker re-reads `settings`/`control_commands` at the start of every
 tick (spec section 3) -- never cache a settings value across ticks.
+
+`control_commands` (`core/db/models.py::ControlCommand`) is used for
+exactly one command: `reset_wallet` (`worker/cycle.py::
+_apply_pending_resets`). Pause/resume write `agents.status` directly
+from the dashboard; the kill switch writes `settings.global.kill_switch`
+directly -- both are plain field flips the worker already reads fresh
+every tick, so queueing them would just be redundant plumbing around a
+value that's already live. A reset is different: it's a multi-row wipe
+(trades -> positions -> decisions -> equity_history -> agent_memory, in
+that FK-safe order, plus dropping the wallet's benchmark seed), so it's
+queued for the worker to apply atomically under the tick lock rather
+than the dashboard reaching in and deleting rows out of band.
 
 When adding a new tunable: if changing it should require a code
 deploy, it's a `Settings` field in `core/config.py` + `.env.example`.
@@ -152,7 +167,60 @@ API -- caught and fixed one real bug this way: a wallet's first-ever
 tick called both `initialize_benchmarks` AND `record_benchmark_tick` in
 the same pass, double-writing its first `equity_history` point (fixed
 in `worker/cycle.py` -- skip the `record` call on the tick that just
-initialized).
+initialized). A Phase 6 fix belongs here too: nothing in Phase 5
+actually persisted the agent's OWN equity curve (only the two
+benchmarks) -- `run_cycle` now writes an `equity_history` row with
+`series="agent"` every tick, right after computing `current_equity`,
+same as the benchmarks.
+
+### Dashboard (`app/`, Streamlit)
+
+Six pages: `Home.py` (per-wallet overview: status/equity/cash/tds
+metrics, the three equity curves together, open positions, a worker-
+heartbeat staleness warning), `pages/1_Agent_Brain.py` (the full
+`decisions` timeline, including holds/rejections), `pages/2_Trades.py`,
+`pages/3_Strategies.py` (the global strategy library + backtest
+history, read-only), `pages/4_Model_Health.py` (`llm_calls` success
+rate/latency/errors per node), `pages/5_Controls_and_Settings.py` (the
+only page gated behind Firebase auth -- see below).
+
+Every page's first few lines are the same boilerplate, in this exact
+order, and it has to be this order:
+1. `sys.path.insert(0, ...)` to the repo root -- `streamlit run` only
+   puts the entry script's own directory on `sys.path`, not the repo
+   root, so a bare `from core...` import fails without this.
+2. `import streamlit as st` + `st.set_page_config(...)` -- **must** be
+   the first real Streamlit command on the page. Found live (Phase 6
+   report): calling `st.secrets` (inside step 3, below) before this
+   makes Streamlit raise `StreamlitSetPageConfigMustBeFirstCommandError`
+   when `set_page_config` runs afterward.
+3. `app.lib.bootstrap.ensure_env_from_secrets()` -- copies Streamlit
+   Community Cloud's `st.secrets` into `os.environ` before anything
+   imports `core.config` (whose `Settings` singleton is built at import
+   time). Locally there's no secrets.toml, so this is a no-op -- but
+   found live (Phase 6 report): merely ACCESSING `st.secrets` when no
+   secrets.toml exists makes Streamlit render a red "No secrets found"
+   error banner as a side effect of the access itself, regardless of
+   whether the resulting exception is caught afterward. Fixed by
+   checking the file exists first (same two paths Streamlit itself
+   checks) and never touching `st.secrets` at all otherwise.
+
+**Auth** (`app/lib/auth.py`): Firebase email/password REST sign-in for
+an ID token, `firebase-admin` verifies it server-side, then the
+token's email must be in `allowed_emails` (`core/config.py`) -- an
+explicit allowlist, not "any Firebase user", matching AI-Trader's own
+dashboard auth precedent. Session state only, no "remember me".
+
+**Writes**: simple field flips (kill switch, pause/resume) write
+`settings`/`agents` directly; `reset_wallet` is queued via
+`control_commands` for the worker to apply -- see the config/settings
+split section above for why the split falls exactly there.
+
+Verified live (Phase 6 report): all 6 pages driven with a real headless
+browser against the real DB (real wallets/decisions/llm_calls/equity
+history), real sidebar click-navigation produced zero console errors,
+and Controls & Settings correctly showed the sign-in form rather than
+the settings controls when signed out.
 
 ## Commands
 
@@ -179,7 +247,7 @@ uv pip install -r requirements.txt
 .venv/bin/uvicorn worker.app:app --reload
 .venv/bin/python -m worker.run_local
 
-# dashboard (Phase 6+)
+# dashboard
 .venv/bin/streamlit run app/Home.py
 ```
 
@@ -257,8 +325,25 @@ summarize, wait for go-ahead before the next:
   double-writing its first `equity_history` point -- fixed in
   `worker/cycle.py` (skip `record_benchmark_tick` on the tick that just
   initialized), with a regression test added.
-- [ ] Phase 6 -- Streamlit dashboard with Firebase auth, all pages,
-  deployment docs (Render + cron-job.org + Streamlit Cloud).
+- [x] **Phase 6** -- Streamlit dashboard, 6 pages (`app/Home.py` +
+  `app/pages/`, see "Dashboard" above), Firebase email/password auth
+  gating only Controls & Settings, deployment docs for Render + cron-
+  job.org + Streamlit Community Cloud (README). Also closed two real
+  gaps found while building this phase: the worker now persists its
+  own equity curve every tick (`equity_history` `series="agent"` --
+  nothing wrote this before, so the dashboard's own "equity vs.
+  benchmarks" chart would have had no agent line), and
+  `control_commands` actually gets processed now (`reset_wallet`,
+  `worker/cycle.py::_apply_pending_resets`) -- the schema existed since
+  Phase 1 but nothing read it until the dashboard had a reason to write
+  to it. 117 tests passing. Verified live: drove all 6 pages with a
+  real headless browser against the real DB -- caught and fixed two
+  real Streamlit bugs this way (`st.set_page_config()` ordering vs.
+  `st.secrets` access; `st.secrets` access itself rendering an error
+  banner even when the exception is caught -- both documented in the
+  "Dashboard" section above since they're the kind of mistake worth not
+  repeating) -- zero console errors on real sidebar click-navigation
+  afterward, and Controls & Settings correctly gated behind sign-in.
 - [ ] Phase 7 (later, on request only) -- live trading engine.
 - [ ] Phase 8 (later) -- LLM provider comparison, polish.
 
