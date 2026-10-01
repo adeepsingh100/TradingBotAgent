@@ -11,7 +11,10 @@ import uuid
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 
-from core.db.models import Agent, ControlCommand, Decision, EquityHistory, Heartbeat, MarketCache, Position, Trade, Wallet
+from core.db.models import (
+    Agent, ControlCommand, Decision, EquityHistory, Heartbeat, LiveOrder, MarketCache, Position, Setting, Strategy,
+    Trade, Wallet,
+)
 from tests.conftest import FakeSession
 from worker import cycle
 
@@ -123,6 +126,100 @@ def test_apply_pending_resets_ignores_already_applied_commands():
 
     assert wallet.current_cash == 1.0  # untouched -- that command was already applied
     assert agent.status == "dead"
+
+
+# --- live wallet branching ---
+
+
+def test_run_cycle_scopes_a_live_wallet_to_live_settings_and_approved_strategies(monkeypatch):
+    session = FakeSession()
+    live_wallet = _wallet(name="live", kind="live")
+    live_agent = Agent(id=uuid.uuid4(), wallet_id=live_wallet.id, status="alive", mode="live")
+    live_agent.wallet = live_wallet
+    session.add(live_agent)
+    session.add(MarketCache(pair="I-BTC_INR", min_quantity=0, max_quantity=1, step=0.0001, min_notional=1,
+                             base_precision=2, target_precision=4, raw={"symbol": "BTCINR"}))
+    session.add(MarketCache(pair="I-ETH_INR", min_quantity=0, max_quantity=1, step=0.0001, min_notional=1,
+                             base_precision=2, target_precision=4, raw={"symbol": "ETHINR"}))
+    session.add(Setting(key="watchlist", value=["BTCINR", "ETHINR"]))
+    session.add(Setting(key="watchlist_live", value=["BTCINR"]))
+    session.add(Setting(key="risk", value={"profile": "paper"}))
+    session.add(Setting(key="risk_live", value={"profile": "live"}))
+    session.add(Strategy(id=uuid.uuid4(), type="ema_crossover", status="draft"))  # paper-only candidate
+    session.add(Strategy(id=uuid.uuid4(), type="rsi_mean_reversion", status="approved_for_live"))
+
+    monkeypatch.setattr(cycle, "get_session", lambda: _session_ctx(session))
+    monkeypatch.setattr(cycle, "acquire_tick_lock", lambda session, holder: True)
+    monkeypatch.setattr(cycle, "get_llm", lambda *a, **kw: object())
+    monkeypatch.setattr(cycle, "_fetch_btc_price", lambda: None)
+    monkeypatch.setattr(cycle, "is_dead", lambda *a, **kw: False)
+
+    captured = {}
+
+    def fake_run_wallet_tick(session, wallet, agent, pair_map, market_cache, strategies, risk, costs,
+                              global_settings, live_trading_enabled, llm, llm_settings):
+        captured["strategies"] = set(strategies.keys())
+        captured["risk"] = risk
+        captured["watchlist"] = sorted(pair_map.keys())
+        return {"wallet": wallet.name, "equity": 1000.0, "prices": {}, "results": []}
+
+    monkeypatch.setattr(cycle, "_run_wallet_tick", fake_run_wallet_tick)
+
+    cycle.run_cycle()
+
+    assert captured["strategies"] == {"rsi_mean_reversion"}  # draft excluded -- only approved_for_live/live
+    assert captured["risk"] == {"profile": "live"}
+    assert captured["watchlist"] == ["BTCINR"]
+
+
+def test_run_cycle_kills_a_dead_live_wallet_via_live_engine(monkeypatch):
+    session = FakeSession()
+    live_wallet = _wallet(name="live", kind="live")
+    live_agent = Agent(id=uuid.uuid4(), wallet_id=live_wallet.id, status="alive", mode="live")
+    live_agent.wallet = live_wallet
+    session.add(live_agent)
+
+    monkeypatch.setattr(cycle, "get_session", lambda: _session_ctx(session))
+    monkeypatch.setattr(cycle, "acquire_tick_lock", lambda session, holder: True)
+    monkeypatch.setattr(cycle, "get_llm", lambda *a, **kw: object())
+    monkeypatch.setattr(cycle, "_fetch_btc_price", lambda: None)
+    monkeypatch.setattr(cycle, "is_dead", lambda *a, **kw: True)
+    monkeypatch.setattr(cycle, "_run_wallet_tick",
+                         lambda *a, **kw: {"wallet": "live", "equity": 1.0, "prices": {}, "results": []})
+
+    paper_kill_calls, live_kill_calls = [], []
+    monkeypatch.setattr(cycle, "kill_wallet", lambda *a, **kw: paper_kill_calls.append(1))
+    monkeypatch.setattr(cycle.live_engine, "kill_wallet", lambda *a, **kw: live_kill_calls.append(1))
+
+    cycle.run_cycle()
+
+    assert live_kill_calls == [1]
+    assert paper_kill_calls == []
+
+
+def test_run_cycle_alerts_on_an_unresolved_live_order(monkeypatch):
+    session = FakeSession()
+    live_wallet = _wallet(name="live", kind="live")
+    live_agent = Agent(id=uuid.uuid4(), wallet_id=live_wallet.id, status="alive", mode="live")
+    live_agent.wallet = live_wallet
+    session.add(live_agent)
+    session.add(LiveOrder(wallet_id=live_wallet.id, pair="BTCINR", side="buy", client_order_id="c1",
+                           status="unknown_needs_manual_check", requested_qty=0.001))
+
+    monkeypatch.setattr(cycle, "get_session", lambda: _session_ctx(session))
+    monkeypatch.setattr(cycle, "acquire_tick_lock", lambda session, holder: True)
+    monkeypatch.setattr(cycle, "get_llm", lambda *a, **kw: object())
+    monkeypatch.setattr(cycle, "_fetch_btc_price", lambda: None)
+    monkeypatch.setattr(cycle, "is_dead", lambda *a, **kw: False)
+    monkeypatch.setattr(cycle, "_run_wallet_tick",
+                         lambda *a, **kw: {"wallet": "live", "equity": 1000.0, "prices": {}, "results": []})
+
+    alerts = []
+    monkeypatch.setattr(cycle, "maybe_send_alert", lambda session, alert_type, settings_map, text, **kw: alerts.append(alert_type))
+
+    cycle.run_cycle()
+
+    assert "live_order_unknown_state" in alerts
 
 
 # --- run_cycle orchestration ---

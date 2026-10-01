@@ -117,3 +117,21 @@ def test_create_order_is_dry_run_by_default_and_never_calls_the_network(monkeypa
 
     assert result["dry_run"] is True
     assert result["would_submit"]["market"] == "BTCINR"
+
+
+def test_create_order_hits_the_real_endpoint_when_allow_live_is_explicitly_true(monkeypatch):
+    monkeypatch.setattr(client.settings, "coindcx_api_key", "k")
+    monkeypatch.setattr(client.settings, "coindcx_api_secret", "s")
+    captured = {}
+
+    def fake_post(url, data=None, headers=None, timeout=10):
+        captured["url"] = url
+        return _FakeResponse(json_data={"id": "123", "status": "open"})
+
+    monkeypatch.setattr(requests, "post", fake_post)
+
+    result = client.create_order("BTCINR", "buy", "market_order", 0.001, allow_live=True)
+
+    assert result == {"id": "123", "status": "open"}
+    assert captured["url"] == f"{client.API_BASE}/exchange/v1/orders/create"
+    assert client.ALLOW_LIVE_ORDERS is False  # the module default is untouched -- only this call opted in

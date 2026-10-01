@@ -1,7 +1,14 @@
 from __future__ import annotations
 
+import uuid
+from datetime import datetime, timedelta, timezone
+
+import pytest
+
 from core.backtester import BacktestResult, BacktestTrade
-from core.promotion import clears_backtest_bar, clears_live_promotion
+from core.db.models import Trade, Wallet
+from core.promotion import clears_backtest_bar, clears_live_promotion, gather_live_promotion_stats
+from tests.conftest import FakeSession
 
 BACKTEST_BAR = {"min_trades": 5, "min_net_pnl": 0, "min_profit_factor": 1.0, "max_drawdown_pct": 25}
 LIVE_CRITERIA = {"min_trades": 20, "min_days": 14, "min_profit_factor": 1.2, "max_drawdown_pct": 15}
@@ -65,3 +72,34 @@ def test_clears_live_promotion_rejects_drawdown_at_the_boundary():
     passed, reasons = clears_live_promotion(_stats(max_drawdown_pct=15.0), LIVE_CRITERIA, benchmark_return_pct=5.0)
     assert passed is False
     assert any("drawdown" in r for r in reasons)
+
+
+def test_gather_live_promotion_stats_returns_none_without_closed_trades():
+    assert gather_live_promotion_stats(FakeSession(), uuid.uuid4()) is None
+
+
+def test_gather_live_promotion_stats_aggregates_paper_wallets_and_excludes_live_and_open_trades():
+    session = FakeSession()
+    strategy_id = uuid.uuid4()
+    paper_1 = Wallet(id=uuid.uuid4(), name="small", kind="paper", starting_capital=1000.0, current_cash=1000.0)
+    paper_2 = Wallet(id=uuid.uuid4(), name="large", kind="paper", starting_capital=2000.0, current_cash=2000.0)
+    live = Wallet(id=uuid.uuid4(), name="live", kind="live", starting_capital=500.0, current_cash=500.0)
+    for w in (paper_1, paper_2, live):
+        session.add(w)
+
+    now = datetime.now(timezone.utc)
+    session.add(Trade(wallet_id=paper_1.id, strategy_id=strategy_id, pair="BTCINR", side="sell",
+                       qty=1, price=1, fee=0, pnl=100.0, executed_at=now - timedelta(days=5)))
+    session.add(Trade(wallet_id=paper_2.id, strategy_id=strategy_id, pair="BTCINR", side="sell",
+                       qty=1, price=1, fee=0, pnl=-20.0, executed_at=now))
+    session.add(Trade(wallet_id=live.id, strategy_id=strategy_id, pair="BTCINR", side="sell",
+                       qty=1, price=1, fee=0, pnl=99999.0, executed_at=now))  # must be excluded -- not paper
+    session.add(Trade(wallet_id=paper_1.id, strategy_id=strategy_id, pair="BTCINR", side="buy",
+                       qty=1, price=1, fee=0, pnl=None, executed_at=now))  # open leg -- excluded, pnl is None
+
+    stats = gather_live_promotion_stats(session, strategy_id)
+
+    assert stats["trade_count"] == 2
+    assert stats["net_pnl"] == pytest.approx(80.0)
+    assert stats["days_tested"] == pytest.approx(5.0, abs=0.01)
+    assert "benchmark_return_pct" in stats

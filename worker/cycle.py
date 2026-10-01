@@ -16,11 +16,12 @@ from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
 
+from core import live_engine
 from core.alerts import maybe_send_alert
 from core.benchmarks import initialize_benchmarks, record_benchmark_tick
 from core.coindcx import client as coindcx_client
 from core.config import settings as env
-from core.db.models import Agent, AgentMemory, ControlCommand, Decision, EquityHistory, MarketCache, Position, Setting, Strategy, Trade
+from core.db.models import Agent, AgentMemory, ControlCommand, Decision, EquityHistory, LiveOrder, MarketCache, Position, Setting, Strategy, Trade
 from core.db.session import get_session
 from core.heartbeat import beat
 from core.llm.provider import get_llm
@@ -85,6 +86,12 @@ def _pair_map(session, watchlist: list[str]) -> dict[str, str]:
     }
 
 
+def _market_cache_by_symbol(session, watchlist: list[str]) -> dict[str, MarketCache]:
+    """Live-only lookup (core/live_engine.py needs step/min_notional to
+    round and validate a real order) -- paper wallets never read this."""
+    return {row.raw.get("symbol"): row for row in session.query(MarketCache).all() if row.raw.get("symbol") in watchlist}
+
+
 def _fetch_btc_price() -> float | None:
     try:
         rows = coindcx_client.get_candles(_BTC_PAIR_CODE, "1h", limit=1)
@@ -111,13 +118,17 @@ def _wallet_risk_state(session, wallet, risk: dict) -> dict:
     return {"trades_today_count": trades_today_count, "daily_pnl_pct": daily_pnl_pct, "cooldown_until": cooldown_until}
 
 
-def _run_wallet_tick(session, wallet, agent, pair_map, strategies, risk, costs, global_settings, llm, llm_settings) -> dict:
+def _run_wallet_tick(
+    session, wallet, agent, pair_map, market_cache, strategies, risk, costs, global_settings,
+    live_trading_enabled, llm, llm_settings,
+) -> dict:
     open_positions = get_open_positions(session, wallet.id)
     risk_state = _wallet_risk_state(session, wallet, risk)
 
     state = {
         "session": session, "wallet": wallet, "agent": agent,
-        "watchlist": list(pair_map.keys()), "pair_map": pair_map,
+        "watchlist": list(pair_map.keys()), "pair_map": pair_map, "market_cache": market_cache,
+        "live_trading_enabled": live_trading_enabled,
         "open_positions": open_positions, "strategies": strategies,
         "risk_settings": risk, "costs_settings": costs,
         "equity": 0.0,  # overwritten by check_exits once prices are loaded
@@ -144,14 +155,24 @@ def run_cycle(holder: str = "worker") -> dict:
 
         settings_map = _load_settings(session)
         risk = settings_map.get("risk", {})
+        # Live wallets never share paper's risk row -- paper's numbers were never
+        # vetted against real-money consequences. Falls back to paper's row only
+        # until a human has actually configured settings["risk_live"].
+        risk_live = settings_map.get("risk_live", risk)
         costs = settings_map.get("costs", {})
         watchlist = settings_map.get("watchlist", [])
+        watchlist_live = settings_map.get("watchlist_live", ["BTCINR"])  # v1: one pair, most liquid, least slippage surprise
         llm_settings = settings_map.get("llm", {})
         global_settings = settings_map.get("global", {})
+        live_trading_enabled = settings_map.get("live_trading", {}).get("enabled", False)
         death_threshold_pct = settings_map.get("death_threshold_pct", env.death_threshold_pct)
 
-        pair_map = _pair_map(session, watchlist)
-        strategies = {s.type: s for s in session.query(Strategy).all() if s.status != "retired"}
+        all_strategies = session.query(Strategy).all()
+        strategies = {s.type: s for s in all_strategies if s.status != "retired"}
+        # A live wallet must only ever see strategies a human has explicitly
+        # promoted -- clearing the statistical bar (core/promotion.py) is never
+        # sufficient alone (settings.global.require_human_approval_for_live).
+        live_strategies = {s.type: s for s in all_strategies if s.status in ("approved_for_live", "live")}
 
         try:
             llm = get_llm(
@@ -167,6 +188,13 @@ def run_cycle(holder: str = "worker") -> dict:
             if agent.status != "alive":
                 continue
             wallet = agent.wallet
+            is_live = wallet.kind == "live"
+
+            wallet_watchlist = watchlist_live if is_live else watchlist
+            wallet_risk = risk_live if is_live else risk
+            wallet_strategies = live_strategies if is_live else strategies
+            pair_map = _pair_map(session, wallet_watchlist)
+            market_cache = _market_cache_by_symbol(session, wallet_watchlist)
 
             benchmark_key = f"benchmark_btc:{wallet.id}"
             just_initialized_benchmarks = False
@@ -174,7 +202,10 @@ def run_cycle(holder: str = "worker") -> dict:
                 initialize_benchmarks(session, wallet, btc_price, costs)
                 just_initialized_benchmarks = True  # already wrote this tick's first equity_history point
 
-            summary = _run_wallet_tick(session, wallet, agent, pair_map, strategies, risk, costs, global_settings, llm, llm_settings)
+            summary = _run_wallet_tick(
+                session, wallet, agent, pair_map, market_cache, wallet_strategies, wallet_risk, costs,
+                global_settings, live_trading_enabled, llm, llm_settings,
+            )
             wallet_summaries.append(summary)
 
             still_open = get_open_positions(session, wallet.id)
@@ -185,7 +216,10 @@ def run_cycle(holder: str = "worker") -> dict:
                 tds_credit_inr=wallet.tds_credit, recorded_at=datetime.now(timezone.utc),
             ))
             if is_dead(wallet, current_equity, death_threshold_pct):
-                kill_wallet(session, wallet, agent, still_open, summary["prices"], costs)
+                if is_live:
+                    live_engine.kill_wallet(session, wallet, agent, still_open, costs, market_cache, allow_live=live_trading_enabled)
+                else:
+                    kill_wallet(session, wallet, agent, still_open, summary["prices"], costs)
                 maybe_send_alert(
                     session, "agent_died", settings_map,
                     f"Wallet '{wallet.name}' died -- equity {current_equity:.2f} fell below "
@@ -194,6 +228,17 @@ def run_cycle(holder: str = "worker") -> dict:
                 )
             elif btc_price is not None and not just_initialized_benchmarks:
                 record_benchmark_tick(session, wallet, btc_price)
+
+            if is_live:
+                for order in session.query(LiveOrder).filter_by(wallet_id=wallet.id).all():
+                    if order.status != "unknown_needs_manual_check":
+                        continue
+                    maybe_send_alert(
+                        session, "live_order_unknown_state", settings_map,
+                        f"Wallet '{wallet.name}': live order {order.client_order_id} ({order.pair} {order.side}) "
+                        f"is in an unknown state -- check CoinDCX's order history manually (LiveOrder id: {order.id}).",
+                        wallet_id=wallet.id,
+                    )
 
         beat(session, "worker_tick", detail={"wallets": len(wallet_summaries)})
         return {"wallets": wallet_summaries}

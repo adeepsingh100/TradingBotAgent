@@ -12,9 +12,14 @@ may touch real money. Full spec is the original build brief (not
 checked into this repo as a separate file -- this CLAUDE.md and the
 phase status below are the living summary of it).
 
-**v1 scope: paper trading only.** The live trading path (exchange order
-placement actually enabled) does not exist yet and must not be built
-until explicitly requested -- see "Phase status" below.
+**Live trading exists (Phase 7, built on explicit request) but is OFF
+by default** -- `settings.live_trading.enabled` (dashboard toggle,
+typed confirmation required) gates every real order, on top of a
+strategy needing a human-approved `approved_for_live`/`live` status. No
+wallet is live until `scripts/create_live_wallet.py` is run manually
+and the toggle is turned on -- see "Live engine" and "Going live"
+(README) below. Paper trading remains the default and only active path
+for every wallet seeded by `scripts/seed_wallets.py`.
 
 ## Architecture
 
@@ -222,6 +227,69 @@ history), real sidebar click-navigation produced zero console errors,
 and Controls & Settings correctly showed the sign-in form rather than
 the settings controls when signed out.
 
+### Live engine (`core/live_engine.py`, Phase 7)
+
+Parallel to `core/paper_engine.py`, but the exchange is the source of
+truth for fill price/qty/fee -- never `core/fees.py::simulate_fill()`'s
+estimate. `open_position`/`close_position`/`kill_wallet` mirror the
+paper versions' call shape plus `allow_live: bool` (threaded from
+`settings.live_trading.enabled`, read fresh every tick -- see the
+config/settings split above) and `market_cache_row` (real order sizing/
+validation needs `step`/`min_notional`, which paper mode never did).
+Market orders only, both entries and exits, never limit -- keeps live
+fills comparable to the taker-fill assumption paper's PnL (and
+therefore the promotion track record) was built on.
+
+**Every entrypoint never lets an exception escape** -- same "any error
+-> safe default, never crash the tick" discipline `core/llm/provider.py
+::call_structured` established for LLM calls, extended here to order
+placement. **Every entrypoint commits each durability checkpoint on the
+caller's own session immediately**, rather than waiting for
+`worker/cycle.py`'s outer transaction -- a real order, once filled, is
+an external fact a later unrelated exception in the same tick must
+never be able to erase from the DB (paper_engine correctly relies on
+that outer transaction since nothing it does is external/irreversible;
+this module deliberately diverges, every time, on purpose). The
+`live_orders` table (migration 0003) is the resulting audit trail: a
+row written `status="pending_submit"` BEFORE the exchange is ever
+called, updated through `submitted`/`filled`/`partially_filled`/
+`timed_out_cancelled`/`error`/`unknown_needs_manual_check` as the real
+order resolves -- ground truth for reconstructing a crash mid-
+placement from the DB + the exchange's own order history, not
+something this module has to get exactly right the first time.
+
+**The ambiguous case** (`create_order` itself throws before an order id
+comes back) disambiguates via `get_active_orders` + `client_order_id`.
+Found -> resumes the SAME poll/cancel/resolve sequence the happy path
+uses (a real bug, caught by unit tests not live ones: an earlier
+version let this path skip straight to treating the one-off
+`active_orders` snapshot as final, never polling for the order's actual
+resolution). Not found -> `error`, no Position/Trade written. If the
+reconciliation check itself also fails -> `unknown_needs_manual_check`
++ a Telegram alert (`live_order_unknown_state`, `worker/cycle.py`,
+60-minute cooldown so a stuck order doesn't re-page every tick) -- this
+escalation path is not optional, it's the backstop for the one failure
+mode nothing here can safely auto-resolve.
+
+**A live wallet is scoped tighter than paper, deliberately** (v1): only
+strategies with `status in ("approved_for_live", "live")` are ever
+candidates (`worker/cycle.py`'s per-wallet `strategies` dict branches
+on `wallet.kind` before the graph ever sees it) -- clearing
+`core/promotion.py::clears_live_promotion`'s statistical bar is never
+sufficient alone, a human must also click "Promote" on Controls &
+Settings. `settings.risk_live`/`settings.watchlist_live` (falls back to
+paper's `risk`/a BTCINR-only default if unset) are separate rows from
+paper's, never shared verbatim -- paper's numbers were never vetted
+against real-money consequences. The "Reset" action is disabled
+entirely for `wallet.kind == "live"` on Controls & Settings -- a live
+wallet needing one is a red flag for manual DB/exchange reconciliation,
+not a self-serve button.
+
+**NOT live-verified** (see Phase status below for why): the actual
+order-response field names/status strings are built from
+docs.coindcx.com, not a real order. Place one tiny real order and
+confirm before trusting this module with meaningful size.
+
 ## Commands
 
 ```bash
@@ -249,6 +317,9 @@ uv pip install -r requirements.txt
 
 # dashboard
 .venv/bin/streamlit run app/Home.py
+
+# one-time: create the live (real-money) wallet, PAUSED by default (Phase 7)
+.venv/bin/python -m scripts.create_live_wallet <starting_capital_inr>
 ```
 
 ## Phase status
@@ -269,8 +340,8 @@ summarize, wait for go-ahead before the next:
   live `markets_details` shows zero INR spot pairs support
   `stop_limit`/`take_profit_limit` despite the docs example suggesting
   otherwise -- see README's "Known risks". `create_order` is
-  implemented and tested but hard-locked to a DRY_RUN preview
-  (`client.ALLOW_LIVE_ORDERS = False`) until Phase 7.
+  implemented and tested but returned a DRY_RUN preview unconditionally
+  until Phase 7 made it dashboard-controllable (`allow_live` kwarg).
 - [x] **Phase 3** -- fee/TDS/slippage model, multi-wallet paper engine,
   risk manager, buy-and-hold-BTC/cash benchmarks. 42 tests passing.
   Verified live: opened/closed a real-priced throwaway position against
@@ -344,8 +415,51 @@ summarize, wait for go-ahead before the next:
   "Dashboard" section above since they're the kind of mistake worth not
   repeating) -- zero console errors on real sidebar click-navigation
   afterward, and Controls & Settings correctly gated behind sign-in.
-- [ ] Phase 7 (later, on request only) -- live trading engine.
-- [ ] Phase 8 (later) -- LLM provider comparison, polish.
+- [x] **Phase 7** -- live trading engine (`core/live_engine.py`, see
+  "Live engine" below), gated behind a dashboard toggle per the user's
+  explicit request ("both [Phase 7 and 8], but with a button to start
+  live trading") -- overriding my own earlier `client.py` comment that
+  said this should never be dashboard-configurable; the user is the
+  authority on that call. `live_orders` audit table (migration 0003).
+  Promotion gate wired for real (`core/promotion.py
+  ::gather_live_promotion_stats`, aggregated across every paper wallet
+  per the strategies-are-global design, plus a human-approval button on
+  Controls & Settings -- clearing the statistical bar is never
+  sufficient alone). `scripts/create_live_wallet.py` (one-time script,
+  not a dashboard form, starts paused). v1 scope is deliberately
+  conservative: one live wallet, one pair (BTCINR), a stricter
+  `risk_live` profile, market orders only, no per-trade approval
+  interrupt (would need the checkpointer this project has repeatedly
+  deferred). 136 tests passing (19 new). A real `run_cycle()` after
+  this phase landed opened a real first paper position (unrelated to
+  Phase 7 itself -- just real market conditions finally clearing the
+  mechanical+LLM gates) with zero live-engine involvement, confirming
+  the new wallet-kind branching doesn't disturb the existing paper
+  path. **Two things explicitly NOT live-verified, by necessity, not
+  oversight**: `core/live_engine.py`'s order-response parsing is built
+  from docs.coindcx.com only -- the real CoinDCX account had ~₹1 INR
+  balance (dust) when this was written, not enough to clear any pair's
+  minimum notional for a real test order; asked the user how to
+  proceed, they chose "build from docs, verify later" over waiting for
+  a deposit. **Found and fixed a real bug this way regardless** -- unit
+  tests (not live ones) caught that the "create_order throws but the
+  order is found via active_orders" recovery path skipped the
+  poll/cancel/resolve sequence entirely, trusting a one-off snapshot as
+  final; fixed by unifying both branches onto one shared poll path in
+  `core/live_engine.py::_submit_and_resolve`.
+- [x] **Phase 8** -- `langchain-anthropic`/`langchain-openai` added
+  (`requirements.txt`, real resolved versions via `uv pip install`, not
+  guessed), Model Health page broken down by `(node, provider)` instead
+  of just `node`. **NOT live-verified**: `ANTHROPIC_API_KEY`/
+  `OPENAI_API_KEY` are both empty in this repo's `.env` -- a real
+  side-by-side provider comparison needs real keys first. What WAS
+  confirmed live: both branches fail cleanly with no key, never a
+  generic crash, but at different points in the call chain --
+  ChatAnthropic defers to call time (ordinary failed `llm_calls` row,
+  same as any provider failure); ChatOpenAI validates eagerly inside
+  `get_llm()` itself (worker/cycle.py's existing try/except around
+  `get_llm()` already covers this). Documented in `core/llm/provider.py
+  ::get_llm`'s docstring and README's "Switching LLM providers".
 
 ## Conventions
 

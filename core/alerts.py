@@ -20,6 +20,9 @@ _STATEFUL_COOLDOWN_MINUTES = {
     "daily_loss_limit_hit": 24 * 60,
     "cooldown_triggered": 24 * 60,
     "repeated_llm_failures": 60,
+    # A stuck unresolved live order stays stuck until a human looks at it --
+    # without a cooldown this would re-page every tick until then.
+    "live_order_unknown_state": 60,
 }
 
 

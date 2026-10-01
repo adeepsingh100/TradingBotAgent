@@ -52,6 +52,9 @@ class FakeSession:
     def flush(self):
         pass
 
+    def commit(self):
+        pass
+
     def delete(self, obj):
         self.deleted.append(obj)
         if obj in self.added:

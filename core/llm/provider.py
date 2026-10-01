@@ -24,16 +24,29 @@ _T = TypeVar("_T", bound=BaseModel)
 
 
 def get_llm(provider: str, model: str, api_keys: dict[str, str]):
+    """`anthropic`/`openai` branches wired and dependency-pinned in
+    Phase 8 but NOT live-verified against a real completion -- both
+    API keys in .env are empty. What IS confirmed: both raise a clean,
+    specific credentials error with no key available, never a generic
+    crash -- but at different points. ChatOpenAI validates eagerly
+    INSIDE this function (its constructor calls the openai SDK's own
+    client init, which checks for a key immediately) -- a caller must
+    wrap get_llm() itself in try/except, which worker/cycle.py already
+    does. ChatAnthropic defers validation to call time instead, so its
+    failure surfaces inside call_structured()'s own try/except as an
+    ordinary failed LLMCall row, same as every other provider failure.
+    Confirm an actual successful completion for both before depending
+    on either in a live flow."""
     if provider == "nvidia":
         from langchain_nvidia_ai_endpoints import ChatNVIDIA
 
         return ChatNVIDIA(model=model, nvidia_api_key=api_keys["nvidia_api_key"], max_completion_tokens=1024)
     if provider == "anthropic":
-        from langchain_anthropic import ChatAnthropic  # needs langchain-anthropic -- add when this branch is used
+        from langchain_anthropic import ChatAnthropic
 
         return ChatAnthropic(model=model, api_key=api_keys["anthropic_api_key"], max_tokens=1024)
     if provider == "openai":
-        from langchain_openai import ChatOpenAI  # needs langchain-openai -- add when this branch is used
+        from langchain_openai import ChatOpenAI
 
         return ChatOpenAI(model=model, api_key=api_keys["openai_api_key"], max_tokens=1024)
     raise ValueError(f"unknown llm provider {provider!r}")

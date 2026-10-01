@@ -9,7 +9,7 @@ import uuid
 import pytest
 
 from core.coindcx import client
-from core.db.models import Decision, Position, Strategy, Trade, Wallet
+from core.db.models import Decision, MarketCache, Position, Strategy, Trade, Wallet
 from core.risk_manager import Proposal
 from core.strategies.base import StrategySignal
 from tests.conftest import FakeSession, make_candles
@@ -33,8 +33,17 @@ def _wallet():
     return Wallet(id=uuid.uuid4(), name="test", kind="paper", starting_capital=1000.0, current_cash=1000.0, tds_credit=0.0)
 
 
+def _live_wallet():
+    return Wallet(id=uuid.uuid4(), name="live", kind="live", starting_capital=1000.0, current_cash=1000.0, tds_credit=0.0)
+
+
 def _strategy():
-    return Strategy(id=uuid.uuid4(), type="ema_crossover", params=_EMA_PARAMS, status="backtested", stats={})
+    return Strategy(id=uuid.uuid4(), type="ema_crossover", params=_EMA_PARAMS, status="approved_for_live", stats={})
+
+
+def _market_cache_row():
+    return MarketCache(pair="I-BTC_INR", min_quantity=0.0001, max_quantity=10, step=0.0001,
+                        min_notional=1, base_precision=2, target_precision=4, raw={"symbol": "BTCINR"})
 
 
 # --- load_market ---
@@ -90,6 +99,47 @@ def test_check_exits_leaves_untouched_when_nothing_triggers():
 
     assert result["open_positions"] == [position]
     assert position.closed_at is None
+
+
+def test_check_exits_closes_a_live_position_via_live_engine(monkeypatch):
+    session = FakeSession()
+    wallet = _live_wallet()
+    position = Position(id=uuid.uuid4(), wallet_id=wallet.id, pair="BTCINR", side="buy", qty=0.001,
+                         entry_price=100.0, stop_loss=90.0, take_profit=120.0)
+
+    def fake_close_position(session, wallet, position, **kw):
+        position.closed_at = "set"  # sentinel -- nodes.py only checks it's not None
+        return object()
+
+    monkeypatch.setattr(nodes.live_engine, "close_position", fake_close_position)
+    state = {
+        "session": session, "wallet": wallet, "costs_settings": COSTS,
+        "open_positions": [position], "candles": {"BTCINR": [{"high": 95, "low": 85, "close": 88}]},
+        "prices": {"BTCINR": 88}, "market_cache": {"BTCINR": _market_cache_row()}, "live_trading_enabled": True,
+    }
+
+    result = nodes.check_exits(state)
+
+    assert result["open_positions"] == []
+    assert position.closed_at == "set"
+
+
+def test_check_exits_leaves_a_live_position_open_when_live_engine_cant_resolve_it(monkeypatch):
+    session = FakeSession()
+    wallet = _live_wallet()
+    position = Position(id=uuid.uuid4(), wallet_id=wallet.id, pair="BTCINR", side="buy", qty=0.001,
+                         entry_price=100.0, stop_loss=90.0, take_profit=120.0)
+
+    monkeypatch.setattr(nodes.live_engine, "close_position", lambda *a, **kw: None)  # unresolved this tick
+    state = {
+        "session": session, "wallet": wallet, "costs_settings": COSTS,
+        "open_positions": [position], "candles": {"BTCINR": [{"high": 95, "low": 85, "close": 88}]},
+        "prices": {"BTCINR": 88}, "market_cache": {"BTCINR": _market_cache_row()}, "live_trading_enabled": True,
+    }
+
+    result = nodes.check_exits(state)
+
+    assert result["open_positions"] == [position]  # stays open -- retried next tick
 
 
 # --- strategize ---
@@ -222,6 +272,60 @@ def test_risk_and_execute_opens_a_position_on_an_approved_proposal():
     assert len(positions) == 1 and positions[0].pair == "BTCINR"
     decisions = [d for d in session.added if isinstance(d, Decision)]
     assert decisions[0].executed_trade_id == positions[0].id
+
+
+def test_risk_and_execute_opens_a_live_position_via_live_engine_on_approval(monkeypatch):
+    session = FakeSession()
+    wallet = _live_wallet()
+    strategy = _strategy()
+    buy_signal = StrategySignal(action="buy", stop_loss=90.0, take_profit=120.0, reasoning="crossed up")
+    proposal = Proposal(action="buy", pair="BTCINR", confidence=0.9, size_inr=100.0)
+
+    fake_position = Position(id=uuid.uuid4(), wallet_id=wallet.id, pair="BTCINR", side="buy", qty=1,
+                              entry_price=100.0, stop_loss=90.0, take_profit=120.0)
+    captured = {}
+
+    def fake_open_position(session, wallet, **kw):
+        captured.update(kw)
+        return fake_position
+
+    monkeypatch.setattr(nodes.live_engine, "open_position", fake_open_position)
+    state = {
+        "session": session, "wallet": wallet, "signals": {"BTCINR": (strategy, buy_signal)},
+        "proposals": {"BTCINR": proposal}, "prices": {"BTCINR": 100.0}, "equity": 1000.0,
+        "open_positions": [], "trades_today_count": 0, "daily_pnl_pct": 0.0, "cooldown_until": None,
+        "kill_switch": False, "risk_settings": RISK, "costs_settings": COSTS,
+        "market_cache": {"BTCINR": _market_cache_row()}, "live_trading_enabled": True,
+    }
+
+    result = nodes.risk_and_execute(state)
+
+    assert result["results"][0]["verdict"] in ("approved", "downsized")
+    assert captured["allow_live"] is True
+    decisions = [d for d in session.added if isinstance(d, Decision)]
+    assert decisions[0].executed_trade_id == fake_position.id
+    assert [p for p in session.added if isinstance(p, Position)] == []  # live_engine, not paper_engine, owns the write
+
+
+def test_risk_and_execute_skips_live_entry_without_a_market_cache_row():
+    session = FakeSession()
+    wallet = _live_wallet()
+    strategy = _strategy()
+    buy_signal = StrategySignal(action="buy", stop_loss=90.0, take_profit=120.0, reasoning="crossed up")
+    proposal = Proposal(action="buy", pair="BTCINR", confidence=0.9, size_inr=100.0)
+    state = {
+        "session": session, "wallet": wallet, "signals": {"BTCINR": (strategy, buy_signal)},
+        "proposals": {"BTCINR": proposal}, "prices": {"BTCINR": 100.0}, "equity": 1000.0,
+        "open_positions": [], "trades_today_count": 0, "daily_pnl_pct": 0.0, "cooldown_until": None,
+        "kill_switch": False, "risk_settings": RISK, "costs_settings": COSTS,
+        "market_cache": {}, "live_trading_enabled": True,
+    }
+
+    result = nodes.risk_and_execute(state)
+
+    assert result["results"][0]["verdict"] in ("approved", "downsized")
+    decisions = [d for d in session.added if isinstance(d, Decision)]
+    assert decisions[0].executed_trade_id is None
 
 
 def test_risk_and_execute_falls_back_to_hold_when_llm_proposal_is_none():

@@ -1,5 +1,6 @@
 import sys
 import uuid
+from datetime import datetime, timezone
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
@@ -15,8 +16,10 @@ ensure_env_from_secrets()
 
 from app.lib.auth import current_email, require_login, sign_out
 from app.lib.queries import list_wallets
-from core.db.models import ControlCommand, Setting
+from core.alerts import maybe_send_alert
+from core.db.models import ControlCommand, Setting, Strategy
 from core.db.session import get_session
+from core.promotion import clears_live_promotion, gather_live_promotion_stats
 
 email = require_login()
 st.sidebar.write(f"Signed in as {email}")
@@ -50,7 +53,63 @@ with get_session() as session:
         _save_setting(session, "global", {**global_settings, "kill_switch": kill_switch})
         st.success("Kill switch updated.")
         st.rerun()
-    st.caption(f"Mode: **{global_settings.get('mode', 'paper')}** -- live trading doesn't exist yet (v1 scope).")
+    st.caption("Blocks every new entry (paper AND live) the instant it's on. Never blocks an exit -- closing risk is never gated.")
+
+    st.divider()
+
+    # --- Live trading enable ---
+    st.subheader("Live trading")
+    live_row, live_trading = _setting(session, "live_trading", {"enabled": False})
+    _, telegram_alerts_for_ping = _setting(session, "telegram_alerts", {})
+    if live_trading.get("enabled"):
+        st.success(f"Live trading is ON (enabled by {live_trading.get('enabled_by', '?')} at {live_trading.get('enabled_at', '?')}).")
+        if st.button("Turn OFF live trading"):
+            _save_setting(session, "live_trading", {"enabled": False})
+            maybe_send_alert(session, "live_trading_disabled", {"telegram_alerts": telegram_alerts_for_ping},
+                              f"Live trading turned OFF by {email}.")
+            st.success("Live trading turned off -- open live positions still exit normally, only new entries are blocked.")
+            st.rerun()
+    else:
+        st.info("Live trading is OFF. No real order will ever be placed while this is off, regardless of any wallet's status.")
+        with st.popover("Turn ON live trading..."):
+            st.warning(
+                "This allows REAL orders with REAL money on any wallet with kind='live' that is alive/resumed. "
+                "Only strategies promoted below are ever eligible. Confirm you understand this is real capital at risk."
+            )
+            typed = st.text_input("Type ENABLE LIVE TRADING to confirm", key="enable_live_confirm")
+            if st.button("Confirm enable", key="enable_live_btn", disabled=(typed != "ENABLE LIVE TRADING")):
+                _save_setting(session, "live_trading", {"enabled": True, "enabled_by": email, "enabled_at": datetime.now(timezone.utc).isoformat()})
+                maybe_send_alert(session, "live_trading_enabled", {"telegram_alerts": telegram_alerts_for_ping},
+                                  f"Live trading turned ON by {email}.")
+                st.success("Live trading enabled.")
+                st.rerun()
+
+    st.divider()
+
+    # --- Promote strategies to live-eligible ---
+    st.subheader("Promote strategies to live")
+    promotion_row, promotion_settings = _setting(session, "promotion", {})
+    live_criteria = promotion_settings.get("live_criteria", {"min_trades": 20, "min_days": 14, "min_profit_factor": 1.2, "max_drawdown_pct": 15})
+    for strategy in session.query(Strategy).order_by(Strategy.type).all():
+        if strategy.status in ("approved_for_live", "live"):
+            st.caption(f"**{strategy.type}**: already `{strategy.status}`.")
+            continue
+        stats = gather_live_promotion_stats(session, strategy.id)
+        if stats is None:
+            st.caption(f"**{strategy.type}**: no closed paper trades yet.")
+            continue
+        benchmark_return_pct = stats.pop("benchmark_return_pct")
+        passed, reasons = clears_live_promotion(stats, live_criteria, benchmark_return_pct)
+        if not passed:
+            st.caption(f"**{strategy.type}**: doesn't clear the bar yet ({'; '.join(reasons)}).")
+            continue
+        with st.popover(f"Promote {strategy.type} to live..."):
+            st.warning(f"This makes '{strategy.type}' eligible for real-money trades on any live wallet. It cleared every criterion: {stats}")
+            typed = st.text_input(f"Type {strategy.type} to confirm", key=f"promote_confirm_{strategy.id}")
+            if st.button("Confirm promotion", key=f"promote_btn_{strategy.id}", disabled=(typed != strategy.type)):
+                strategy.status = "approved_for_live"
+                st.success(f"'{strategy.type}' promoted to approved_for_live.")
+                st.rerun()
 
     st.divider()
 
@@ -59,7 +118,7 @@ with get_session() as session:
     for wallet in list_wallets(session):
         agent = wallet.agent
         cols = st.columns([2, 2, 2, 2, 3])
-        cols[0].write(f"**{wallet.name}**")
+        cols[0].write(f"**{wallet.name}** (`{wallet.kind}`)")
         cols[1].write(f"status: `{agent.status if agent else 'unknown'}`")
 
         if agent and agent.status == "alive":
@@ -73,13 +132,16 @@ with get_session() as session:
         else:
             cols[2].caption("dead -- reset to revive")
 
-        with cols[3].popover("Reset..."):
-            st.warning(f"This wipes ALL of {wallet.name}'s trades/positions/decisions/equity history and restores starting capital. Cannot be undone.")
-            typed = st.text_input("Type the wallet name to confirm", key=f"reset_confirm_{wallet.id}")
-            if st.button("Confirm reset", key=f"reset_btn_{wallet.id}", disabled=(typed != wallet.name)):
-                session.add(ControlCommand(id=uuid.uuid4(), wallet_id=wallet.id, command="reset_wallet", payload={}, status="pending"))
-                st.success("Reset queued -- the worker applies it on its next tick.")
-                st.rerun()
+        if wallet.kind == "live":
+            cols[3].caption("Reset disabled for live wallets -- a live wallet needing one is a red flag for manual DB/exchange reconciliation, not a self-serve button.")
+        else:
+            with cols[3].popover("Reset..."):
+                st.warning(f"This wipes ALL of {wallet.name}'s trades/positions/decisions/equity history and restores starting capital. Cannot be undone.")
+                typed = st.text_input("Type the wallet name to confirm", key=f"reset_confirm_{wallet.id}")
+                if st.button("Confirm reset", key=f"reset_btn_{wallet.id}", disabled=(typed != wallet.name)):
+                    session.add(ControlCommand(id=uuid.uuid4(), wallet_id=wallet.id, command="reset_wallet", payload={}, status="pending"))
+                    st.success("Reset queued -- the worker applies it on its next tick.")
+                    st.rerun()
 
     st.divider()
 

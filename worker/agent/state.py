@@ -17,6 +17,8 @@ class AgentState(TypedDict, total=False):
     agent: Any
     watchlist: list[str]
     pair_map: dict[str, str]  # symbol ("BTCINR") -> CoinDCX pair code ("I-BTC_INR")
+    market_cache: dict[str, Any]  # symbol -> MarketCache row (live order sizing/validation)
+    live_trading_enabled: bool  # settings.live_trading.enabled, only meaningful for wallet.kind == "live"
     candles: dict[str, list[dict]]
     prices: dict[str, float]
     open_positions: list[Any]

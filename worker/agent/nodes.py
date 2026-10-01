@@ -22,6 +22,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 
+from core import live_engine
 from core.coindcx import client
 from core.db.models import Decision
 from core.llm.provider import call_structured
@@ -44,6 +45,15 @@ def load_market(state: dict) -> dict:
 
 
 def check_exits(state: dict) -> dict:
+    """Mechanical stop/target check -- `check_stop_or_target` itself is
+    reused verbatim for both paper and live wallets (it's pure, no
+    reason to duplicate it). What happens AFTER it fires branches on
+    wallet kind: paper simulates the exit at the candle's stop/target
+    level; live submits a real market sell (`core.live_engine
+    .close_position`), whose actual fill price will legitimately differ
+    slightly from `exit_price` (real slippage) -- `exit_price` here is
+    only ever used as the simulated-fill price for paper, never passed
+    to the live path."""
     session, wallet, costs = state["session"], state["wallet"], state["costs_settings"]
     closed_pairs = []
     for position in state["open_positions"]:
@@ -54,7 +64,19 @@ def check_exits(state: dict) -> dict:
         reason, exit_price = check_stop_or_target(position, last["high"], last["low"])
         if reason is None:
             continue
-        close_position(session, wallet, position, exit_price=exit_price, costs_settings=costs)
+
+        if wallet.kind == "live":
+            market_cache_row = state["market_cache"].get(position.pair)
+            if market_cache_row is None:
+                continue  # can't size a live sell without it -- leave open, retry next tick
+            trade = live_engine.close_position(
+                session, wallet, position, costs_settings=costs, market_cache_row=market_cache_row,
+                allow_live=state["live_trading_enabled"],
+            )
+            if trade is None or position.closed_at is None:
+                continue  # unresolved this tick (partial fill/timeout/error) -- stays open, retried next tick
+        else:
+            close_position(session, wallet, position, exit_price=exit_price, costs_settings=costs)
         closed_pairs.append(position.pair)
 
     remaining = [p for p in state["open_positions"] if p.pair not in closed_pairs]
@@ -185,13 +207,27 @@ def risk_and_execute(state: dict) -> dict:
         session.flush()
 
         if verdict.verdict in ("approved", "downsized"):
-            position = open_position(
-                session, wallet, pair=symbol, qty=verdict.approved_qty, entry_price=proposal.entry,
-                stop_loss=proposal.stop_loss, take_profit=proposal.take_profit,
-                costs_settings=state["costs_settings"], strategy_id=strategy.id, decision_id=decision.id,
-            )
-            session.flush()
-            decision.executed_trade_id = position.id
+            if wallet.kind == "live":
+                market_cache_row = state["market_cache"].get(symbol)
+                position = (
+                    live_engine.open_position(
+                        session, wallet, pair=symbol, qty=verdict.approved_qty, price_hint=proposal.entry,
+                        stop_loss=proposal.stop_loss, take_profit=proposal.take_profit,
+                        costs_settings=state["costs_settings"], market_cache_row=market_cache_row,
+                        strategy_id=strategy.id, decision_id=decision.id, allow_live=state["live_trading_enabled"],
+                    )
+                    if market_cache_row is not None
+                    else None
+                )
+            else:
+                position = open_position(
+                    session, wallet, pair=symbol, qty=verdict.approved_qty, entry_price=proposal.entry,
+                    stop_loss=proposal.stop_loss, take_profit=proposal.take_profit,
+                    costs_settings=state["costs_settings"], strategy_id=strategy.id, decision_id=decision.id,
+                )
+            if position is not None:
+                session.flush()
+                decision.executed_trade_id = position.id
 
         results.append({"pair": symbol, "verdict": verdict.verdict, "reason": verdict.reason})
     return {"results": results}

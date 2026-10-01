@@ -339,6 +339,44 @@ class Log(Base):
     created_at: Mapped[datetime] = _created_at()
 
 
+class LiveOrder(Base):
+    """Audit trail for every REAL order `core/live_engine.py` ever
+    attempts -- written BEFORE the exchange call (status
+    'pending_submit'), updated as the real order resolves. This is the
+    ground truth that makes a crash mid-placement reconstructable from
+    the DB + the exchange's own order history, which is why
+    live_engine commits each state transition immediately rather than
+    waiting for the tick's outer transaction (see live_engine.py's
+    module docstring)."""
+
+    __tablename__ = "live_orders"
+
+    id: Mapped[uuid.UUID] = _uuid_pk()
+    wallet_id: Mapped[uuid.UUID] = mapped_column(ForeignKey("wallets.id"), nullable=False)
+    # Plain UUID columns, not FKs -- same reasoning as Decision.executed_trade_id:
+    # this row is written before the position/trade/decision it ends up
+    # pointing at necessarily exist yet.
+    decision_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    position_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    trade_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
+    pair: Mapped[str] = mapped_column(String, nullable=False)
+    side: Mapped[str] = mapped_column(String, nullable=False)  # buy | sell
+    client_order_id: Mapped[str] = mapped_column(String, nullable=False)
+    exchange_order_id: Mapped[str | None] = mapped_column(String)
+    status: Mapped[str] = mapped_column(String, nullable=False, default="pending_submit")
+    # pending_submit | submitted | filled | partially_filled |
+    # timed_out_cancelled | error | unknown_needs_manual_check
+    requested_qty: Mapped[float] = mapped_column(Float, nullable=False)
+    filled_qty: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    filled_price: Mapped[float | None] = mapped_column(Float)
+    raw_response: Mapped[dict] = mapped_column(JSON, nullable=False, default=dict)
+    error: Mapped[str | None] = mapped_column(Text)
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default="now()", onupdate=datetime.utcnow, nullable=False
+    )
+
+
 class AlertSent(Base):
     """Logs every Telegram alert actually sent -- lets the worker avoid
     re-sending a stateful alert (e.g. heartbeat-missing) every single

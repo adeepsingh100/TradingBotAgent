@@ -121,13 +121,50 @@ locally or Streamlit secrets in the cloud. Only these four keys are
 needed -- the dashboard never calls the LLM or CoinDCX directly, so it
 needs none of the worker's other secrets.
 
+## Going live (real money -- Phase 7)
+
+Everything below is OFF by default. Nothing here places a real order
+until every step is done:
+
+1. **Let a strategy prove itself in paper trading first.** The
+   Strategies page's "Live-promotion status" section shows each
+   strategy's aggregated paper track record against spec section 5's
+   strict bar (20+ trades, 14+ days, profit factor >=1.2, drawdown
+   <15%, beats BTC buy-and-hold).
+2. **Promote it**, on Controls & Settings (auth-gated), once it clears
+   the bar -- typed confirmation required. This only makes the
+   strategy *eligible*; it still needs an alive live wallet to ever
+   actually trade.
+3. **Create a live wallet**: `python -m scripts.create_live_wallet <starting_capital_inr>`
+   -- only create this with capital you're OK calling a total loss.
+   Starts PAUSED.
+4. **Resume it** on Controls & Settings.
+5. **Turn ON live trading** on Controls & Settings -- typed
+   confirmation required (`ENABLE LIVE TRADING`). This is the single
+   global switch `core/coindcx/client.py::create_order`'s `allow_live`
+   is threaded from, read fresh every tick.
+
+The kill switch (same page) instantly blocks every new entry, paper
+and live, but never blocks an exit. Turning live trading back OFF
+behaves the same way -- open live positions still exit normally.
+**Before step 5 with any real size**, verify
+`core/live_engine.py`'s order-response parsing against one real tiny
+order -- see Known risks below, this was NOT live-verified while
+building it.
+
 ## Switching LLM providers
 
 The LLM provider is a factory (`core/llm/provider.py`, added Phase 5)
 keyed off the `settings` table's `llm.provider`/`llm.model` (see
 `CLAUDE.md`'s config/settings split) -- switching from NVIDIA to
 Anthropic or OpenAI is a Settings-page edit plus the matching API key
-in `.env`/Render env vars, not a code change.
+in `.env`/Render env vars, not a code change. `langchain-anthropic`/
+`langchain-openai` are pinned (Phase 8) but **NOT live-verified** --
+`ANTHROPIC_API_KEY`/`OPENAI_API_KEY` are empty in this repo's `.env`.
+Confirm an actual successful structured-output completion for whichever
+one you switch to before relying on it live; see `core/llm/provider.py
+::get_llm`'s docstring for what IS confirmed (both fail cleanly with no
+key, at different points in the call chain) vs. what isn't.
 
 ## Known risks
 
@@ -137,12 +174,21 @@ in `.env`/Render env vars, not a code change.
   real INR spot pairs (2026-10-01) found **zero** that actually offer
   anything beyond `limit_order`/`market_order` (see
   `core/coindcx/client.py`'s module docstring). Spec section 10 asked
-  to flag this if it turned out to be true: the live engine (Phase 7+)
-  cannot place an exchange-side stop and must simulate one by polling
-  and submitting a market/limit sell when the stop level is crossed --
-  a real gap window exists between the price crossing the stop and the
-  bot's next tick actually firing the sell. Re-check `order_types` on
-  the pairs you actually trade before going live; this could change.
+  to flag this if it turned out to be true: `core/live_engine.py`
+  (Phase 7) cannot place an exchange-side stop and simulates one by
+  polling, submitting a real market sell when the stop level is
+  crossed -- a real gap window exists between the price crossing the
+  stop and the bot's next tick actually firing the sell. Re-check
+  `order_types` on the pairs you actually trade before going live;
+  this could change.
+- **`core/live_engine.py`'s order lifecycle (status strings, field
+  names on create/status/trade_history/active_orders responses) is
+  built from docs.coindcx.com, NOT a real order** -- the CoinDCX
+  account had ~₹1 INR balance (dust) when this was written, not
+  enough to clear any pair's minimum notional. Place one tiny real
+  order manually and confirm the actual response shapes match before
+  ever turning on live trading with meaningful size (Controls &
+  Settings' "Turn ON live trading" toggle).
 - **CoinDCX fee %**: this repo's default fee-rate seed values
   (`scripts/seed_wallets.py::DEFAULT_SETTINGS["costs"]`) are UNVERIFIED
   against an official CoinDCX source -- their fee pages blocked

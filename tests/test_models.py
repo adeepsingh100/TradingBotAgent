@@ -16,7 +16,7 @@ EXPECTED_TABLES = {
     "users", "wallets", "agents", "strategies", "backtests", "decisions",
     "positions", "trades", "agent_memory", "equity_history", "llm_calls",
     "control_commands", "settings", "market_cache", "locks", "heartbeats",
-    "logs", "alerts_sent",
+    "logs", "alerts_sent", "live_orders",
 }
 
 

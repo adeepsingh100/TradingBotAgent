@@ -43,6 +43,22 @@ DEFAULT_SETTINGS = {
         "slippage_pct": 0.1,
     },
     "watchlist": ["BTCINR", "ETHINR", "SOLINR"],
+    # Live wallets never trade paper's full watchlist or risk profile --
+    # v1 is deliberately one pair, tighter caps (Phase 7 report). Falls back
+    # to the "risk" row above if unset; worker/cycle.py reads this directly.
+    "watchlist_live": ["BTCINR"],
+    "risk_live": {
+        "max_position_size_pct": 10,
+        "max_risk_per_trade_pct": 1,
+        "daily_loss_limit_pct": 4,
+        "max_open_positions": 1,
+        "max_trades_per_day": 2,
+        "min_reward_to_cost_multiple": 1.5,
+        "min_confidence": 0.75,
+        "cooldown_hours_after_losses": 8,
+        "consecutive_losses_trigger": 2,
+    },
+    "live_trading": {"enabled": False},
     "promotion": {
         # Loose bar: draft -> backtested is "worth trying in paper",
         # not "worth real money" -- core/promotion.py::clears_backtest_bar.
@@ -73,6 +89,13 @@ DEFAULT_SETTINGS = {
         "repeated_llm_failures": True,
         "agent_died": True,
         "daily_summary": True,
+        # Phase 7 -- live_order_unknown_state is the critical escalation for
+        # core/live_engine.py's unresolvable-fill-ambiguity case; note
+        # core/alerts.py::maybe_send_alert already defaults an unmapped
+        # alert_type to True, so it fires even on a DB without this key yet.
+        "live_order_unknown_state": True,
+        "live_trading_enabled": True,
+        "live_trading_disabled": True,
     },
     "global": {
         "kill_switch": False,

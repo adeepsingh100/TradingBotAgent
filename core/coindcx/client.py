@@ -29,10 +29,15 @@ from core.config import settings
 API_BASE = "https://api.coindcx.com"
 PUBLIC_BASE = "https://public.coindcx.com"
 
-# Hard-coded, not a settings/env flag -- matches this repo's other
-# hard-coded safety locks (spot-only, no leverage). Flip only in
-# Phase 7, and only alongside the live-approval flow spec section 5
-# requires; never make this configurable from the dashboard.
+# The default for any caller that doesn't pass create_order's
+# `allow_live` kwarg explicitly (e.g. a future scratchpad script) --
+# NOT the active live-trading gate as of Phase 7. That gate is
+# dashboard-controlled by design (user's explicit request): the
+# `settings` table's `live_trading.enabled` key, read fresh every
+# tick by worker/cycle.py and threaded into create_order's
+# `allow_live` param. Keeping this constant False is still real
+# defense-in-depth -- it's what create_order() falls back to if any
+# future caller forgets the kwarg.
 ALLOW_LIVE_ORDERS = False
 
 
@@ -157,22 +162,31 @@ def create_order(
     total_quantity: float,
     price_per_unit: float | None = None,
     client_order_id: str | None = None,
+    *,
+    allow_live: bool = ALLOW_LIVE_ORDERS,
 ) -> dict:
     """`market` is the `symbol` field from markets_details (e.g.
     "BTCINR"), confirmed from the API's own create-order example --
     different from get_candles' `pair` identifier, don't mix them up.
 
-    Returns a preview dict instead of calling the API unless
-    ALLOW_LIVE_ORDERS is flipped (Phase 7+) -- v1 never places a real
-    order; this function exists now so its interface/signing is proven
-    correct ahead of that phase, per spec section 10."""
+    Returns a preview dict instead of calling the API unless the
+    caller explicitly passes `allow_live=True`. `ALLOW_LIVE_ORDERS`
+    (the module constant) is only the default for a caller that
+    doesn't pass `allow_live` at all -- a safety fuse for any future
+    scratchpad script, not the active gate. The real gate (Phase 7:
+    `core/live_engine.py`) lives in the `settings` table's
+    `live_trading.enabled` key, read fresh every tick by
+    `worker/cycle.py` and passed in explicitly here -- deliberately
+    NOT read from the DB in this module, so `client.py` stays
+    network-only with zero DB/session dependency and every existing
+    test (mocking `requests` alone) keeps working unmodified."""
     body: dict = {"market": market, "side": side, "order_type": order_type, "total_quantity": total_quantity}
     if price_per_unit is not None:
         body["price_per_unit"] = price_per_unit
     if client_order_id is not None:
         body["client_order_id"] = client_order_id
 
-    if not ALLOW_LIVE_ORDERS:
+    if not allow_live:
         return {"dry_run": True, "would_submit": body}
 
-    return _post_signed("/exchange/v1/orders/create", body)  # pragma: no cover -- unreachable until Phase 7
+    return _post_signed("/exchange/v1/orders/create", body)
