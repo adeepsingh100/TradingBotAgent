@@ -30,6 +30,7 @@ from core.paper_engine import check_stop_or_target, close_position, equity, open
 from core.risk_manager import Proposal, RiskContext, evaluate
 from core.strategies.registry import generate_signal
 
+from .memory import record_lesson, track_record
 from .schemas import StrategizeOutput
 
 
@@ -76,7 +77,11 @@ def check_exits(state: dict) -> dict:
             if trade is None or position.closed_at is None:
                 continue  # unresolved this tick (partial fill/timeout/error) -- stays open, retried next tick
         else:
-            close_position(session, wallet, position, exit_price=exit_price, costs_settings=costs)
+            trade = close_position(session, wallet, position, exit_price=exit_price, costs_settings=costs)
+        try:
+            record_lesson(session, wallet, position, trade, reason)
+        except Exception:  # noqa: BLE001 -- a lost lesson must never block the remaining exits this tick
+            pass
         closed_pairs.append(position.pair)
 
     remaining = [p for p in state["open_positions"] if p.pair not in closed_pairs]
@@ -130,7 +135,7 @@ def strategize(state: dict) -> dict:
         return {"strategy_assignment": {}}
 
     strategy_types = sorted(state["strategies"].keys())
-    prompt = _survival_brief(state) + (
+    prompt = _survival_brief(state) + track_record(state["session"], state["wallet"].id) + (
         "Choose ONE trading strategy type per pair for this tick, based on its recent trend/volatility.\n"
         f"Available strategy types: {strategy_types}\n"
         "Recent market context:\n" + "\n".join(context_lines) + "\n"
@@ -175,7 +180,7 @@ def decide(state: dict) -> dict:
             proposals[symbol] = None
             continue
         price = state["prices"][symbol]
-        prompt = _survival_brief(state) + (
+        prompt = _survival_brief(state) + track_record(state["session"], state["wallet"].id) + (
             f"Strategy '{strategy.type}' generated a BUY signal for {symbol} at price {price}.\n"
             f"Proposed stop_loss={signal.stop_loss}, take_profit={signal.take_profit}.\n"
             f"Strategy reasoning: {signal.reasoning}\n"

@@ -109,7 +109,8 @@ def test_check_exits_closes_a_live_position_via_live_engine(monkeypatch):
 
     def fake_close_position(session, wallet, position, **kw):
         position.closed_at = "set"  # sentinel -- nodes.py only checks it's not None
-        return object()
+        return Trade(wallet_id=wallet.id, position_id=position.id, pair="BTCINR", side="sell", qty=0.001,
+                     price=88.0, fee=0.0, pnl=-0.012)
 
     monkeypatch.setattr(nodes.live_engine, "close_position", fake_close_position)
     state = {

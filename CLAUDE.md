@@ -154,6 +154,16 @@ Two LLM call sites, both logged to `llm_calls` (`node` column):
   already handed. `core.risk_manager.evaluate()` then gates the result
   exactly as it would any other proposal.
 
+**Prompt context** -- both prompts open with a survival brief (money
+left, death line, distance to death -- `nodes.py::_survival_brief`)
+and the wallet's track record (`worker/agent/memory.py`): every closed
+position writes a lesson to `agent_memory` (outcome, exit reason,
+entry reasoning), and prompts get W/L per strategy and per coin plus
+the last 10 lessons. Learning is in-context only, no extra LLM call;
+risk_manager stays the only hard gate. Paper wallets pick their own
+pairs each tick (`core/universe.py`, top INR pairs by 24h volume,
+`watchlist` setting is only the ticker-outage fallback).
+
 **Exits are never LLM-gated** -- `check_exits` is pure mechanical
 stop/target (`paper_engine.check_stop_or_target`), same reasoning
 AI-Trader's own CLAUDE.md documents for removing its LLM signal-
