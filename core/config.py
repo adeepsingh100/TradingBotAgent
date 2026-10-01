@@ -22,7 +22,15 @@ class Settings(BaseSettings):
     database_url: str
 
     # --- Worker auth ---
-    tick_token: str
+    # Defaults empty, not required -- worker-only (worker/app.py's POST /tick
+    # auth check), but this Settings class is shared with app/ (the
+    # dashboard), which never reads tick_token and whose secrets.toml
+    # deliberately doesn't include it (see app/.streamlit/secrets.toml.example).
+    # A required-with-no-default field here would make Settings() itself
+    # unconstructable for the dashboard. The worker's own deployment is what
+    # actually enforces a real value (render.yaml's TICK_TOKEN has no
+    # default -- Render prompts for it), not Pydantic required-ness.
+    tick_token: str = ""
 
     # --- LLM provider factory defaults (overridable via the `settings`
     # table's llm_provider/llm_model keys -- these are just what a fresh
