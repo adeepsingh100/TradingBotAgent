@@ -37,12 +37,36 @@ from .schemas import StrategizeOutput
 def load_market(state: dict) -> dict:
     candles, prices = {}, {}
     for symbol, pair_code in state["pair_map"].items():
-        rows = client.get_candles(pair_code, "1h", limit=100)
+        rows = client.get_candles(pair_code, state.get("candle_interval", "1h"), limit=100)
         rows = list(reversed(rows))  # API returns newest-first; every consumer here needs oldest-first
         candles[symbol] = rows
         if rows:
             prices[symbol] = rows[-1]["close"]
     return {"candles": candles, "prices": prices}
+
+
+def close_triggered(
+    session, wallet, position, reason: str, exit_price: float, costs: dict, market_cache_row, allow_live: bool,
+) -> bool:
+    """Closes one position whose stop/target fired, records the lesson,
+    and says whether it actually closed. Shared by the tick's
+    `check_exits` and the between-tick exit guard (worker/exit_guard.py)
+    so both exit paths behave identically."""
+    if wallet.kind == "live":
+        if market_cache_row is None:
+            return False  # can't size a live sell without it -- leave open, retry next pass
+        trade = live_engine.close_position(
+            session, wallet, position, costs_settings=costs, market_cache_row=market_cache_row, allow_live=allow_live,
+        )
+        if trade is None or position.closed_at is None:
+            return False  # unresolved (partial fill/timeout/error) -- stays open, retried next pass
+    else:
+        trade = close_position(session, wallet, position, exit_price=exit_price, costs_settings=costs)
+    try:
+        record_lesson(session, wallet, position, trade, reason)
+    except Exception:  # noqa: BLE001 -- a lost lesson must never block the remaining exits
+        pass
+    return True
 
 
 def check_exits(state: dict) -> dict:
@@ -66,23 +90,11 @@ def check_exits(state: dict) -> dict:
         if reason is None:
             continue
 
-        if wallet.kind == "live":
-            market_cache_row = state["market_cache"].get(position.pair)
-            if market_cache_row is None:
-                continue  # can't size a live sell without it -- leave open, retry next tick
-            trade = live_engine.close_position(
-                session, wallet, position, costs_settings=costs, market_cache_row=market_cache_row,
-                allow_live=state["live_trading_enabled"],
-            )
-            if trade is None or position.closed_at is None:
-                continue  # unresolved this tick (partial fill/timeout/error) -- stays open, retried next tick
-        else:
-            trade = close_position(session, wallet, position, exit_price=exit_price, costs_settings=costs)
-        try:
-            record_lesson(session, wallet, position, trade, reason)
-        except Exception:  # noqa: BLE001 -- a lost lesson must never block the remaining exits this tick
-            pass
-        closed_pairs.append(position.pair)
+        if close_triggered(
+            session, wallet, position, reason, exit_price, costs,
+            state.get("market_cache", {}).get(position.pair), state.get("live_trading_enabled", False),
+        ):
+            closed_pairs.append(position.pair)
 
     remaining = [p for p in state["open_positions"] if p.pair not in closed_pairs]
     current_equity = equity(wallet, remaining, state["prices"])

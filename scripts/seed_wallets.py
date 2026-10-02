@@ -12,6 +12,7 @@ from core.config import settings as env
 from core.db.models import Agent, Setting, Wallet
 from core.db.session import get_session
 from core.universe import DEFAULT_UNIVERSE
+from worker.research import DEFAULT_RESEARCH
 
 DEFAULT_WALLETS = [
     ("small", env.wallet_small_starting_capital),
@@ -50,6 +51,15 @@ DEFAULT_SETTINGS = {
     # Paper wallets pick their own pairs every tick from the live ticker
     # (core/universe.py); `watchlist` is only the fallback if that call fails.
     "universe": DEFAULT_UNIVERSE,
+    # Candle interval every strategy reads (and research backtests on).
+    # "15m" is supported but, backtested 2026-10-02 on BTC/ETH, every
+    # strategy lost 4-7x faster per day on 15m than 1h (more trades, same
+    # ~1.7% round-trip cost) -- switch only once research finds 15m params
+    # that survive out of sample.
+    "candle_interval": "1h",
+    # Self-improving strategies (worker/research.py): one strategy per run,
+    # at most every `every_hours`, accepted only if better out of sample.
+    "research": DEFAULT_RESEARCH,
     "watchlist": ["BTCINR", "ETHINR", "SOLINR"],
     # Live wallets never trade paper's full watchlist or risk profile --
     # v1 is deliberately one pair, tighter caps (Phase 7 report). Falls back

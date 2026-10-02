@@ -1,17 +1,29 @@
 """FastAPI app -- `POST /tick` runs exactly one full agent cycle and
-returns a JSON summary; no long-running loop in production (cron-
-job.org calls this on a schedule). See run_local.py for the local-dev
-equivalent that loops in-process instead of over HTTP.
+returns a JSON summary (cron-job.org calls it every minute). The only
+in-process loop is the exit guard (worker/exit_guard.py), started at
+boot: a mechanical stop/target check every few seconds between ticks.
+See run_local.py for the local-dev equivalent that loops in-process
+instead of over HTTP.
 """
 
 from __future__ import annotations
+
+from contextlib import asynccontextmanager
 
 from fastapi import FastAPI, Header, HTTPException
 
 from core.config import settings
 from worker.cycle import run_cycle
+from worker.exit_guard import start_exit_guard
 
-app = FastAPI(title="Survivor worker")
+
+@asynccontextmanager
+async def _lifespan(app: FastAPI):
+    start_exit_guard(settings.exit_guard_seconds)  # daemon thread, dies with the process
+    yield
+
+
+app = FastAPI(title="Survivor worker", lifespan=_lifespan)
 
 
 @app.post("/tick")

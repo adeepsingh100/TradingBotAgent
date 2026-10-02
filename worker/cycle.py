@@ -25,12 +25,13 @@ from core.db.models import Agent, AgentMemory, ControlCommand, Decision, EquityH
 from core.db.session import get_session
 from core.heartbeat import beat
 from core.llm.provider import get_llm
-from core.lock import acquire_tick_lock
+from core.lock import acquire_tick_lock, release_lock
 from core.paper_engine import equity, get_open_positions, is_dead, kill_wallet
 from core.risk_manager import consecutive_losses
 from core.universe import top_inr_symbols
 
 from .agent.graph import build_graph
+from .research import DEFAULT_RESEARCH, mark_research_run, research_due, research_one
 
 _GRAPH = build_graph()
 _BTC_PAIR_CODE = "I-BTC_INR"
@@ -111,6 +112,27 @@ def _auto_watchlist(universe_cfg: dict, fallback: list[str]) -> list[str]:
         return fallback
 
 
+def _maybe_research(session, settings_map, llm, llm_settings, watchlist, risk, costs, candle_interval) -> dict | None:
+    """Strategy research (worker/research.py), at most every
+    `research.every_hours`. Runs inside a SAVEPOINT so a failure rolls
+    back only its own writes -- it must never cost the tick its trades."""
+    cfg = {**DEFAULT_RESEARCH, **settings_map.get("research", {})}
+    if llm is None or not research_due(session, cfg["every_hours"]):
+        return None
+    symbols = watchlist[:2] or ["BTCINR"]
+    try:
+        with session.begin_nested():
+            report = research_one(
+                session, llm, symbols=symbols, pair_map=_pair_map(session, symbols), interval=candle_interval,
+                costs=costs, size_pct=risk.get("max_position_size_pct", 20), cfg=cfg,
+                provider=llm_settings.get("provider", env.llm_provider), model=llm_settings.get("model", env.llm_model),
+            )
+    except Exception as exc:  # noqa: BLE001 -- research is optional; a failed run is retried next window
+        report = {"error": str(exc)[:500]}
+    mark_research_run(session, report)
+    return report
+
+
 def _wallet_risk_state(session, wallet, risk: dict) -> dict:
     all_trades = session.query(Trade).filter_by(wallet_id=wallet.id).all()
     today_start = datetime.now(timezone.utc).replace(hour=0, minute=0, second=0, microsecond=0)
@@ -131,7 +153,7 @@ def _wallet_risk_state(session, wallet, risk: dict) -> dict:
 
 def _run_wallet_tick(
     session, wallet, agent, pair_map, market_cache, strategies, risk, costs, global_settings,
-    live_trading_enabled, llm, llm_settings, death_threshold_pct,
+    live_trading_enabled, llm, llm_settings, death_threshold_pct, candle_interval="1h",
 ) -> dict:
     open_positions = get_open_positions(session, wallet.id)
     risk_state = _wallet_risk_state(session, wallet, risk)
@@ -145,6 +167,7 @@ def _run_wallet_tick(
         "equity": 0.0,  # overwritten by check_exits once prices are loaded
         "kill_switch": global_settings.get("kill_switch", False),
         "death_threshold_pct": death_threshold_pct,
+        "candle_interval": candle_interval,
         "llm": llm, "llm_provider": llm_settings.get("provider", "nvidia"), "llm_model": llm_settings.get("model", ""),
         "candles": {}, "prices": {}, "strategy_assignment": {}, "signals": {}, "proposals": {}, "results": [],
         **risk_state,
@@ -180,6 +203,7 @@ def run_cycle(holder: str = "worker") -> dict:
         global_settings = settings_map.get("global", {})
         live_trading_enabled = settings_map.get("live_trading", {}).get("enabled", False)
         death_threshold_pct = settings_map.get("death_threshold_pct", env.death_threshold_pct)
+        candle_interval = settings_map.get("candle_interval", "1h")
 
         all_strategies = session.query(Strategy).all()
         strategies = {s.type: s for s in all_strategies if s.status != "retired"}
@@ -221,7 +245,7 @@ def run_cycle(holder: str = "worker") -> dict:
 
             summary = _run_wallet_tick(
                 session, wallet, agent, pair_map, market_cache, wallet_strategies, wallet_risk, costs,
-                global_settings, live_trading_enabled, llm, llm_settings, death_threshold_pct,
+                global_settings, live_trading_enabled, llm, llm_settings, death_threshold_pct, candle_interval,
             )
             wallet_summaries.append(summary)
 
@@ -257,5 +281,8 @@ def run_cycle(holder: str = "worker") -> dict:
                         wallet_id=wallet.id,
                     )
 
+        research_report = _maybe_research(session, settings_map, llm, llm_settings, watchlist, risk, costs, candle_interval)
+
         beat(session, "worker_tick", detail={"wallets": len(wallet_summaries)})
-        return {"wallets": wallet_summaries}
+        release_lock(session, holder=holder)  # next minute's /tick can start right away
+        return {"wallets": wallet_summaries, **({"research": research_report} if research_report else {})}

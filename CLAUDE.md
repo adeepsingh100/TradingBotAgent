@@ -164,6 +164,36 @@ risk_manager stays the only hard gate. Paper wallets pick their own
 pairs each tick (`core/universe.py`, top INR pairs by 24h volume,
 `watchlist` setting is only the ticker-outage fallback).
 
+**Cadence** -- cron-job.org hits `/tick` every minute; the tick lock
+(`core/lock.py`) fails fast (`lock_timeout`, ~2s) when a tick is still
+running instead of queueing behind its open transaction, and is
+released explicitly at the end of `run_cycle`. Between ticks, the
+**exit guard** (`worker/exit_guard.py`, a daemon thread started by
+`worker/app.py`'s lifespan and by `run_local.py`) checks every open
+position's stop/target against one live ticker call every
+`EXIT_GUARD_SECONDS`, via the same `nodes.close_triggered` the tick
+uses. It takes its own `exit_lock`, not `tick_lock` (a tick holds that
+through its LLM calls), and sets `lock_timeout` on its pass so it never
+waits on a running tick's writes. A simultaneous close of the same
+position by both is resolved by SERIALIZABLE aborting one transaction --
+never a double sell.
+
+**Self-improving strategies** (`worker/research.py`) -- inside a tick,
+at most every `settings.research.every_hours`, one strategy per run:
+the LLM proposes up to 3 param sets within the Params bounds, each is
+backtested on real candles, and a winner must beat the current params
+on BOTH the first 70% (train) and the unseen last 30% (validation)
+and be profitable on validation. Accepted -> new `draft` row, old row
+retired (never edited in place: promotion stats aggregate per
+strategy_id). `approved_for_live`/`live` rows are never touched. Runs
+in a SAVEPOINT so a failure can't cost the tick its trades. There can
+now be several rows per strategy type (all but one retired) --
+`strategies` dicts filter `status != "retired"`; never look one up by
+type with `.one_or_none()`.
+
+`settings.candle_interval` (default `"1h"`): `"15m"` is supported, but
+backtested 2026-10-02 every strategy lost 4-7x faster per day on 15m.
+
 **Exits are never LLM-gated** -- `check_exits` is pure mechanical
 stop/target (`paper_engine.check_stop_or_target`), same reasoning
 AI-Trader's own CLAUDE.md documents for removing its LLM signal-

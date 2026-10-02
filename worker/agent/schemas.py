@@ -17,3 +17,21 @@ class StrategyAssignment(BaseModel):
 
 class StrategizeOutput(BaseModel):
     assignments: list[StrategyAssignment] = []
+
+
+class ParamValue(BaseModel):
+    name: str
+    value: float
+
+
+class ParamCandidate(BaseModel):
+    params: list[ParamValue]
+    reasoning: str = ""
+
+
+class ResearchOutput(BaseModel):
+    """Structured-output shape for the strategy-research LLM call
+    (worker/research.py). Params are a list of name/value pairs, not a
+    free-form dict -- strict JSON-schema mode needs fixed properties."""
+
+    candidates: list[ParamCandidate] = []

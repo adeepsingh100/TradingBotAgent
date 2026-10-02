@@ -32,6 +32,11 @@ class Settings(BaseSettings):
     # default -- Render prompts for it), not Pydantic required-ness.
     tick_token: str = ""
 
+    # --- Exit guard (worker/exit_guard.py) -- seconds between stop/target
+    # passes in the worker process; 0 disables. Process-level (a thread
+    # started at boot), so env, not the settings table.
+    exit_guard_seconds: float = 10.0
+
     # --- LLM provider factory defaults (overridable via the `settings`
     # table's llm_provider/llm_model keys -- these are just what a fresh
     # DB gets seeded with) ---

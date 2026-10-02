@@ -14,7 +14,7 @@ def main() -> None:
     with get_session() as session:
         for strategy_type, (params_class, _) in STRATEGY_REGISTRY.items():
             default_params = params_class().model_dump()
-            existing = session.query(Strategy).filter_by(type=strategy_type).one_or_none()
+            existing = session.query(Strategy).filter_by(type=strategy_type).first()  # research keeps retired versions too
             if existing is not None:
                 print(f"strategy '{strategy_type}' already exists, skipping")
                 continue

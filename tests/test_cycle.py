@@ -30,6 +30,8 @@ def _no_live_ticker(monkeypatch):
     def boom():
         raise RuntimeError("no network in tests")
     monkeypatch.setattr(cycle.coindcx_client, "get_ticker", boom)
+    monkeypatch.setattr(cycle, "release_lock", lambda session, holder: None)
+    monkeypatch.setattr(cycle, "research_due", lambda session, every_hours: False)
 
 
 # --- _auto_watchlist ---
@@ -182,7 +184,7 @@ def test_run_cycle_scopes_a_live_wallet_to_live_settings_and_approved_strategies
     captured = {}
 
     def fake_run_wallet_tick(session, wallet, agent, pair_map, market_cache, strategies, risk, costs,
-                              global_settings, live_trading_enabled, llm, llm_settings, death_threshold_pct):
+                              global_settings, live_trading_enabled, llm, llm_settings, death_threshold_pct, candle_interval):
         captured["strategies"] = set(strategies.keys())
         captured["risk"] = risk
         captured["watchlist"] = sorted(pair_map.keys())

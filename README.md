@@ -105,16 +105,24 @@ No Blueprint -> manual **Web Service**: build command
 `pip install -r requirements.txt`, start command
 `uvicorn worker.app:app --host 0.0.0.0 --port $PORT`, same env vars.
 
-Render free-tier web services sleep when idle -- that's fine,
-cron-job.org's hit on `/tick` wakes it.
+Render free-tier web services sleep after ~15 idle minutes. A `/tick`
+every minute (below) keeps it awake, which is what lets the **exit
+guard** run: a background thread in the worker
+(`worker/exit_guard.py`) that checks every open position's stop/target
+against the live price every `EXIT_GUARD_SECONDS` (default 10) between
+ticks, no LLM involved. If the instance does sleep, the guard pauses
+until the next `/tick` wakes it, and that tick's own exit check covers
+the gap.
 
 ### cron-job.org
 
 Create a cron job hitting `POST https://<your-render-app>.onrender.com/tick`
-with header `X-Tick-Token: <same value as TICK_TOKEN>`. Interval: spec
-section 3's cadence (every 5-15 minutes is reasonable for v1 -- the
-tick lock, `core/lock.py`, makes an overlapping/retried call a no-op,
-not a double-tick).
+with header `X-Tick-Token: <same value as TICK_TOKEN>`. Interval:
+**every 1 minute** (cron-job.org's minimum). A tick that's still
+running (LLM calls can take a minute or more) makes the next call
+return `{"skipped": ...}` within ~2s instead of queueing -- see
+`core/lock.py`. cron-job.org's own 30s request timeout is fine: the
+worker finishes the tick even after the caller hangs up.
 
 ### Dashboard to Streamlit Community Cloud
 

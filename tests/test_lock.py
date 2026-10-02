@@ -8,7 +8,7 @@ from __future__ import annotations
 from datetime import datetime, timedelta, timezone
 
 from core.db.models import Lock
-from core.lock import acquire_tick_lock
+from core.lock import acquire_tick_lock, release_lock
 
 
 class _FakeResult:
@@ -38,7 +38,14 @@ class FakeLockSession:
         if existing is not None:
             self.rows[existing.name] = existing
 
-    def execute(self, stmt, params):
+    def execute(self, stmt, params=None):
+        if params is None:  # SET LOCAL lock_timeout -- nothing to fake
+            return _FakeResult(None)
+        if "locked_until = NULL" in str(stmt):  # release_lock
+            row = self.rows.get(params["name"])
+            if row is not None and row.holder == params["holder"]:
+                row.locked_until = None
+            return _FakeResult(None)
         row = self.rows.get(params["name"])
         if row is None:
             return _FakeResult(None)
@@ -83,3 +90,18 @@ def test_acquire_tick_lock_fails_when_held_and_not_expired():
 
     assert acquire_tick_lock(session, holder="worker-2") is False
     assert session.rows["tick_lock"].holder == "other-worker"
+
+
+def test_release_lock_lets_the_next_run_acquire_immediately():
+    session = FakeLockSession()
+    assert acquire_tick_lock(session, holder="a") is True
+    assert acquire_tick_lock(session, holder="b") is False
+    release_lock(session, holder="a")
+    assert acquire_tick_lock(session, holder="b") is True
+
+
+def test_release_lock_never_frees_someone_elses_lock():
+    session = FakeLockSession()
+    assert acquire_tick_lock(session, holder="a") is True
+    release_lock(session, holder="b")
+    assert acquire_tick_lock(session, holder="c") is False
