@@ -9,6 +9,20 @@ takes `max_completion_tokens`, not `max_tokens`; client timeout is a
 hardcoded ~30s with no constructor override; no typed rate-limit
 exception exists to special-case, hence the blanket `except Exception`
 below -- that's deliberate, not sloppy.
+
+Found live (llm_calls errors, 2026-10-02): ChatNVIDIA's own
+`with_structured_output` tries THREE request formats in sequence
+(OpenAI `response_format`, then top-level `guided_json`, then
+`nvext.guided_json`) and re-raises only the LAST error. The hosted API
+now rejects `guided_json` outright (400 "unknown field"), so every real
+failure of the first attempt -- a 429, or a reply cut off at the token
+cap -- surfaced as that misleading 400, and burned 3 requests against
+the rate limit instead of 1. `_ChatNVIDIA` below sends only the
+`response_format` request, which works (verified live), so the real
+error is what gets logged. The model (nemotron) spends hidden reasoning
+tokens before its JSON (~650 output tokens for a ~100-token Proposal),
+so the cap is 4096, not 1024 -- a truncated reply is raised explicitly
+rather than silently parsed as None.
 """
 
 from __future__ import annotations
@@ -21,6 +35,16 @@ from pydantic import BaseModel
 from core.db.models import LLMCall
 
 _T = TypeVar("_T", bound=BaseModel)
+
+_RATE_LIMIT_RETRY_DELAYS_S = (2, 5)  # short -- a tick shouldn't stall long on a busy free tier
+
+
+def _parse_reply(schema: type[_T]):
+    def parse(message) -> _T:
+        if (message.response_metadata or {}).get("finish_reason") == "length":
+            raise ValueError("reply cut off at max_completion_tokens before the JSON finished")
+        return schema.model_validate_json(message.content)
+    return parse
 
 
 def get_llm(provider: str, model: str, api_keys: dict[str, str]):
@@ -38,9 +62,17 @@ def get_llm(provider: str, model: str, api_keys: dict[str, str]):
     Confirm an actual successful completion for both before depending
     on either in a live flow."""
     if provider == "nvidia":
+        from langchain_core.runnables import RunnableLambda
         from langchain_nvidia_ai_endpoints import ChatNVIDIA
 
-        return ChatNVIDIA(model=model, nvidia_api_key=api_keys["nvidia_api_key"], max_completion_tokens=1024)
+        class _ChatNVIDIA(ChatNVIDIA):
+            def with_structured_output(self, schema, **kwargs):  # see module docstring
+                fmt = {"type": "json_schema", "json_schema": {
+                    "name": schema.__name__, "schema": schema.model_json_schema(), "strict": True,
+                }}
+                return self.bind(response_format=fmt) | RunnableLambda(_parse_reply(schema))
+
+        return _ChatNVIDIA(model=model, nvidia_api_key=api_keys["nvidia_api_key"], max_completion_tokens=4096)
     if provider == "anthropic":
         from langchain_anthropic import ChatAnthropic
 
@@ -65,7 +97,14 @@ def call_structured(
 ) -> _T | None:
     start = time.monotonic()
     try:
-        result = llm.with_structured_output(schema).invoke(messages)
+        for delay in (*_RATE_LIMIT_RETRY_DELAYS_S, None):
+            try:
+                result = llm.with_structured_output(schema).invoke(messages)
+                break
+            except Exception as exc:  # noqa: BLE001 -- only a 429 is retried, anything else re-raises below
+                if delay is None or "[429]" not in str(exc):
+                    raise
+                time.sleep(delay)
         latency_ms = int((time.monotonic() - start) * 1000)
         session.add(
             LLMCall(wallet_id=wallet_id, node=node, provider=provider, model=model, latency_ms=latency_ms, success=True)

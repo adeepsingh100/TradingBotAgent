@@ -75,3 +75,51 @@ def test_call_structured_returns_none_and_logs_a_failure_row_on_any_exception():
     assert len(session.added) == 1
     assert session.added[0].success is False
     assert "provider timeout" in session.added[0].error
+
+
+class _FlakyLLM:
+    """Fails with the given errors in order, then succeeds."""
+
+    def __init__(self, errors, result):
+        self._errors, self._result, self.calls = list(errors), result, 0
+
+    def with_structured_output(self, schema):
+        return self
+
+    def invoke(self, messages):
+        self.calls += 1
+        if self._errors:
+            raise self._errors.pop(0)
+        return self._result
+
+
+def test_call_structured_retries_a_429_then_succeeds(monkeypatch):
+    monkeypatch.setattr("core.llm.provider.time.sleep", lambda s: None)
+    session = FakeSession()
+    llm = _FlakyLLM([RuntimeError("[429] Too Many Requests")], _Schema(value="ok"))
+
+    result = call_structured(session, llm, _Schema, [], node="decide", wallet_id="w1", provider="nvidia", model="m")
+
+    assert result == _Schema(value="ok")
+    assert llm.calls == 2
+    assert session.added[0].success is True
+
+
+def test_call_structured_does_not_retry_a_non_429_error(monkeypatch):
+    monkeypatch.setattr("core.llm.provider.time.sleep", lambda s: None)
+    session = FakeSession()
+    llm = _FlakyLLM([RuntimeError("[400] bad request")], _Schema(value="ok"))
+
+    assert call_structured(session, llm, _Schema, [], node="decide", wallet_id="w1", provider="nvidia", model="m") is None
+    assert llm.calls == 1
+
+
+def test_nvidia_structured_output_raises_on_a_truncated_reply():
+    from types import SimpleNamespace
+
+    from core.llm.provider import _parse_reply
+
+    with pytest.raises(ValueError, match="cut off"):
+        _parse_reply(_Schema)(SimpleNamespace(response_metadata={"finish_reason": "length"}, content='{"val'))
+    ok = SimpleNamespace(response_metadata={"finish_reason": "stop"}, content='{"value": "x"}')
+    assert _parse_reply(_Schema)(ok) == _Schema(value="x")
