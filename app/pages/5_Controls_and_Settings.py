@@ -45,6 +45,16 @@ def _save_setting(session, key: str, value) -> None:
         row.value = value
 
 
+def _commit_and_rerun(session) -> None:
+    """Commit BEFORE st.rerun(). st.rerun() raises RerunException -- a
+    BaseException, not an Exception -- so get_session()'s commit (which
+    only runs when the `with` block exits normally) is skipped and the
+    session closes with the write discarded. Found live: "Confirm enable"
+    on live trading (and every other save-then-rerun here) never stuck."""
+    session.commit()
+    st.rerun()
+
+
 with get_session() as session:
     # --- Global kill switch ---
     st.subheader("Kill switch")
@@ -53,7 +63,7 @@ with get_session() as session:
     if kill_switch != global_settings.get("kill_switch", False):
         _save_setting(session, "global", {**global_settings, "kill_switch": kill_switch})
         st.success("Kill switch updated.")
-        st.rerun()
+        _commit_and_rerun(session)
     st.caption("Blocks every new entry (paper AND live) the instant it's on. Never blocks an exit -- closing risk is never gated.")
 
     st.divider()
@@ -69,7 +79,7 @@ with get_session() as session:
             maybe_send_alert(session, "live_trading_disabled", {"telegram_alerts": telegram_alerts_for_ping},
                               f"Live trading turned OFF by {email}.")
             st.success("Live trading turned off -- open live positions still exit normally, only new entries are blocked.")
-            st.rerun()
+            _commit_and_rerun(session)
     else:
         st.info("Live trading is OFF. No real order will ever be placed while this is off, regardless of any wallet's status.")
         with st.popover("Turn ON live trading..."):
@@ -83,7 +93,7 @@ with get_session() as session:
                 maybe_send_alert(session, "live_trading_enabled", {"telegram_alerts": telegram_alerts_for_ping},
                                   f"Live trading turned ON by {email}.")
                 st.success("Live trading enabled.")
-                st.rerun()
+                _commit_and_rerun(session)
 
     st.divider()
 
@@ -110,7 +120,7 @@ with get_session() as session:
             if st.button("Confirm promotion", key=f"promote_btn_{strategy.id}", disabled=(typed != strategy.type)):
                 strategy.status = "approved_for_live"
                 st.success(f"'{strategy.type}' promoted to approved_for_live.")
-                st.rerun()
+                _commit_and_rerun(session)
 
     st.divider()
 
@@ -125,11 +135,11 @@ with get_session() as session:
         if agent and agent.status == "alive":
             if cols[2].button("Pause", key=f"pause_{wallet.id}"):
                 agent.status = "paused"
-                st.rerun()
+                _commit_and_rerun(session)
         elif agent and agent.status == "paused":
             if cols[2].button("Resume", key=f"resume_{wallet.id}"):
                 agent.status = "alive"
-                st.rerun()
+                _commit_and_rerun(session)
         else:
             cols[2].caption("dead -- reset to revive")
 
@@ -142,7 +152,7 @@ with get_session() as session:
                 if st.button("Confirm reset", key=f"reset_btn_{wallet.id}", disabled=(typed != wallet.name)):
                     session.add(ControlCommand(id=uuid.uuid4(), wallet_id=wallet.id, command="reset_wallet", payload={}, status="pending"))
                     st.success("Reset queued -- the worker applies it on its next tick.")
-                    st.rerun()
+                    _commit_and_rerun(session)
 
     st.divider()
 
