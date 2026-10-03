@@ -156,6 +156,7 @@ def strategize(state: dict) -> dict:
     result = call_structured(
         state["session"], llm, StrategizeOutput, [{"role": "user", "content": prompt}],
         node="strategize", wallet_id=state["wallet"].id, provider=state["llm_provider"], model=state["llm_model"],
+        think=False,  # a 5-way pick per pair; reasoning here only ever ran into the token cap
     )
     if result is None:
         return {"strategy_assignment": {}}

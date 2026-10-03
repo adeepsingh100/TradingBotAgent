@@ -23,10 +23,19 @@ error is what gets logged. The model (nemotron) spends hidden reasoning
 tokens before its JSON (~650 output tokens for a ~100-token Proposal),
 so the cap is 4096, not 1024 -- a truncated reply is raised explicitly
 rather than silently parsed as None.
+
+Still hit the 4096 cap on ~3% of `strategize` calls (17 of 623 in 12h,
+2026-10-03) -- runaway hidden reasoning. Measured live on a real-sized
+strategize prompt, 6 samples each: thinking on = 391-831 output tokens
+in 3-25s; `chat_template_kwargs={"enable_thinking": False}` = 61-159
+tokens in ~1s, no reasoning text, same valid JSON. `think=False` turns
+it off per call: used for strategize (picking one of 5 types per pair
+needs no deliberation), kept on for decide/research.
 """
 
 from __future__ import annotations
 
+import inspect
 import time
 from typing import TypeVar
 
@@ -66,11 +75,12 @@ def get_llm(provider: str, model: str, api_keys: dict[str, str]):
         from langchain_nvidia_ai_endpoints import ChatNVIDIA
 
         class _ChatNVIDIA(ChatNVIDIA):
-            def with_structured_output(self, schema, **kwargs):  # see module docstring
+            def with_structured_output(self, schema, *, think: bool = True, **kwargs):  # see module docstring
                 fmt = {"type": "json_schema", "json_schema": {
                     "name": schema.__name__, "schema": schema.model_json_schema(), "strict": True,
                 }}
-                return self.bind(response_format=fmt) | RunnableLambda(_parse_reply(schema))
+                extra = {} if think else {"chat_template_kwargs": {"enable_thinking": False}}
+                return self.bind(response_format=fmt, **extra) | RunnableLambda(_parse_reply(schema))
 
         return _ChatNVIDIA(model=model, nvidia_api_key=api_keys["nvidia_api_key"], max_completion_tokens=4096)
     if provider == "anthropic":
@@ -94,12 +104,17 @@ def call_structured(
     wallet_id,
     provider: str,
     model: str,
+    think: bool = True,
 ) -> _T | None:
     start = time.monotonic()
     try:
         for delay in (*_RATE_LIMIT_RETRY_DELAYS_S, None):
             try:
-                result = llm.with_structured_output(schema).invoke(messages)
+                # Only our _ChatNVIDIA declares `think`; other clients would forward an
+                # unknown kwarg to their API, so they always get the default call.
+                supports_think = "think" in inspect.signature(llm.with_structured_output).parameters
+                structured = llm.with_structured_output(schema, **({"think": False} if not think and supports_think else {}))
+                result = structured.invoke(messages)
                 break
             except Exception as exc:  # noqa: BLE001 -- only a 429 is retried, anything else re-raises below
                 if delay is None or "[429]" not in str(exc):

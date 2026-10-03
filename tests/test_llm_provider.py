@@ -123,3 +123,25 @@ def test_nvidia_structured_output_raises_on_a_truncated_reply():
         _parse_reply(_Schema)(SimpleNamespace(response_metadata={"finish_reason": "length"}, content='{"val'))
     ok = SimpleNamespace(response_metadata={"finish_reason": "stop"}, content='{"value": "x"}')
     assert _parse_reply(_Schema)(ok) == _Schema(value="x")
+
+
+class _ThinkAwareLLM:
+    def __init__(self):
+        self.think = None
+
+    def with_structured_output(self, schema, *, think: bool = True):
+        self.think = think
+        return _FakeStructuredLLM(_Schema(value="ok"))
+
+
+def test_think_false_reaches_a_client_that_supports_it():
+    llm = _ThinkAwareLLM()
+    call_structured(FakeSession(), llm, _Schema, [], node="strategize", wallet_id="w", provider="nvidia", model="m", think=False)
+    assert llm.think is False
+
+
+def test_think_false_is_not_passed_to_a_client_without_it():
+    # _FakeLLM.with_structured_output takes only `schema` -- passing think would TypeError
+    result = call_structured(FakeSession(), _FakeLLM(result=_Schema(value="ok")), _Schema, [],
+                             node="strategize", wallet_id="w", provider="anthropic", model="m", think=False)
+    assert result == _Schema(value="ok")
