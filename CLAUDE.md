@@ -206,7 +206,11 @@ retry.
 
 **Verified live** (Phase 5 report): both schemas (`StrategizeOutput`,
 `core.risk_manager.Proposal`) work with ChatNVIDIA's
-`.with_structured_output()` on `nvidia/nemotron-3-super-120b-a12b`. A
+`.with_structured_output()` on `nvidia/nemotron-3-super-120b-a12b`
+(retired by NVIDIA 2026-10-03, HTTP 410 -- replaced by
+`nvidia/nemotron-3-ultra-550b-a55b`, the only same-family model that
+passed strategize/decide/research live; `openai/gpt-oss-20b` also
+passed and is the fallback choice; settings.llm.model hot-switches it). A
 real `run_cycle()` ran end to end against the real DB/CoinDCX API/NVIDIA
 API -- caught and fixed one real bug this way: a wallet's first-ever
 tick called both `initialize_benchmarks` AND `record_benchmark_tick` in

@@ -15,7 +15,7 @@ services:
       - key: LLM_PROVIDER
         value: nvidia
       - key: LLM_MODEL
-        value: nvidia/nemotron-3-super-120b-a12b
+        value: nvidia/nemotron-3-ultra-550b-a55b
       - key: NVIDIA_API_KEY
         sync: false
       - key: ANTHROPIC_API_KEY

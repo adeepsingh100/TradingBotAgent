@@ -41,7 +41,7 @@ class Settings(BaseSettings):
     # table's llm_provider/llm_model keys -- these are just what a fresh
     # DB gets seeded with) ---
     llm_provider: str = "nvidia"
-    llm_model: str = "nvidia/nemotron-3-super-120b-a12b"
+    llm_model: str = "nvidia/nemotron-3-ultra-550b-a55b"
     nvidia_api_key: str = ""
     anthropic_api_key: str = ""
     openai_api_key: str = ""
