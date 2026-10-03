@@ -145,3 +145,33 @@ def test_think_false_is_not_passed_to_a_client_without_it():
     result = call_structured(FakeSession(), _FakeLLM(result=_Schema(value="ok")), _Schema, [],
                              node="strategize", wallet_id="w", provider="anthropic", model="m", think=False)
     assert result == _Schema(value="ok")
+
+
+def test_call_structured_retries_a_503_overload(monkeypatch):
+    monkeypatch.setattr("core.llm.provider.time.sleep", lambda s: None)
+    llm = _FlakyLLM([RuntimeError("[503] Service temporarily overloaded")], _Schema(value="ok"))
+
+    assert call_structured(FakeSession(), llm, _Schema, [], node="decide", wallet_id="w", provider="nvidia", model="m") == _Schema(value="ok")
+    assert llm.calls == 2
+
+
+def test_fallback_answers_when_primary_fails_and_both_attempts_are_logged(monkeypatch):
+    session = FakeSession()
+    primary = _FakeLLM(exc=RuntimeError("Read timed out"))
+    backup = _FakeLLM(result=_Schema(value="from backup"))
+
+    result = call_structured(session, primary, _Schema, [], node="decide", wallet_id="w", provider="nvidia",
+                             model="big", fallback=(backup, "nvidia", "small"))
+
+    assert result == _Schema(value="from backup")
+    assert [(c.model, c.success) for c in session.added] == [("big", False), ("small", True)]
+
+
+def test_fallback_not_called_when_primary_succeeds():
+    session = FakeSession()
+    backup = _FlakyLLM([], _Schema(value="unused"))
+
+    call_structured(session, _FakeLLM(result=_Schema(value="ok")), _Schema, [], node="decide", wallet_id="w",
+                    provider="nvidia", model="big", fallback=(backup, "nvidia", "small"))
+
+    assert backup.calls == 0 and len(session.added) == 1

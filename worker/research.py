@@ -123,7 +123,7 @@ def _prompt(strategy: Strategy, bounds: dict, baseline: dict, costs: dict, inter
 
 
 def research_one(session, llm, *, symbols: list[str], pair_map: dict[str, str], interval: str,
-                 costs: dict, size_pct: float, cfg: dict, provider: str, model: str) -> dict:
+                 costs: dict, size_pct: float, cfg: dict, provider: str, model: str, fallback=None) -> dict:
     candidates = [s for s in session.query(Strategy).all() if s.status in RESEARCHABLE]
     if not candidates:
         return {"skipped": "no researchable strategy"}
@@ -144,7 +144,7 @@ def research_one(session, llm, *, symbols: list[str], pair_map: dict[str, str], 
     output = call_structured(
         session, llm, ResearchOutput,
         [{"role": "user", "content": _prompt(strategy, params_class.model_json_schema()["properties"], baseline, costs, interval, list(series))}],
-        node="research", wallet_id=None, provider=provider, model=model,
+        node="research", wallet_id=None, provider=provider, model=model, fallback=fallback,
     )
     tried = []
     for cand in (output.candidates if output else [])[:3]:

@@ -184,7 +184,7 @@ def test_run_cycle_scopes_a_live_wallet_to_live_settings_and_approved_strategies
     captured = {}
 
     def fake_run_wallet_tick(session, wallet, agent, pair_map, market_cache, strategies, risk, costs,
-                              global_settings, live_trading_enabled, llm, llm_settings, death_threshold_pct, candle_interval):
+                              global_settings, live_trading_enabled, llm, llm_settings, death_threshold_pct, candle_interval, llm_fallback):
         captured["strategies"] = set(strategies.keys())
         captured["risk"] = risk
         captured["watchlist"] = sorted(pair_map.keys())
@@ -353,3 +353,11 @@ def test_run_cycle_keeps_a_held_pair_that_fell_out_of_the_auto_watchlist(monkeyp
     cycle.run_cycle()
 
     assert captured["watchlist"] == ["BTCINR", "XRPINR"]  # top-N pick + the pair it still holds
+
+
+def test_fallback_llm_defaults_to_gpt_oss_on_nvidia_and_can_be_disabled(monkeypatch):
+    monkeypatch.setattr(cycle, "get_llm", lambda provider, model, keys: f"llm:{model}")
+
+    assert cycle._fallback_llm({"provider": "nvidia", "model": "big"}) == ("llm:openai/gpt-oss-20b", "nvidia", "openai/gpt-oss-20b")
+    assert cycle._fallback_llm({"provider": "nvidia", "model": "big", "fallback_model": ""}) is None
+    assert cycle._fallback_llm({"provider": "anthropic", "model": "claude"}) is None

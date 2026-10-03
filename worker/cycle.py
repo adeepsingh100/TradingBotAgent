@@ -35,6 +35,7 @@ from .research import DEFAULT_RESEARCH, mark_research_run, research_due, researc
 
 _GRAPH = build_graph()
 _BTC_PAIR_CODE = "I-BTC_INR"
+_DEFAULT_NVIDIA_FALLBACK = "openai/gpt-oss-20b"
 
 
 def _apply_pending_resets(session) -> None:
@@ -112,7 +113,24 @@ def _auto_watchlist(universe_cfg: dict, fallback: list[str]) -> list[str]:
         return fallback
 
 
-def _maybe_research(session, settings_map, llm, llm_settings, watchlist, risk, costs, candle_interval) -> dict | None:
+def _fallback_llm(llm_settings: dict) -> tuple | None:
+    """(llm, provider, model) for call_structured's fallback, or None.
+    Defaults to openai/gpt-oss-20b on NVIDIA -- the only other served
+    model that passed strategize/decide/research live (2026-10-03).
+    Set settings.llm.fallback_model to "" to disable."""
+    provider = llm_settings.get("provider", env.llm_provider)
+    model = llm_settings.get("fallback_model", _DEFAULT_NVIDIA_FALLBACK if provider == "nvidia" else "")
+    if not model or model == llm_settings.get("model", env.llm_model):
+        return None
+    try:
+        return get_llm(provider, model, {
+            "nvidia_api_key": env.nvidia_api_key, "anthropic_api_key": env.anthropic_api_key, "openai_api_key": env.openai_api_key,
+        }), provider, model
+    except Exception:  # noqa: BLE001 -- no fallback is fine, the primary still runs
+        return None
+
+
+def _maybe_research(session, settings_map, llm, llm_settings, watchlist, risk, costs, candle_interval, llm_fallback=None) -> dict | None:
     """Strategy research (worker/research.py), at most every
     `research.every_hours`. Runs inside a SAVEPOINT so a failure rolls
     back only its own writes -- it must never cost the tick its trades."""
@@ -126,6 +144,7 @@ def _maybe_research(session, settings_map, llm, llm_settings, watchlist, risk, c
                 session, llm, symbols=symbols, pair_map=_pair_map(session, symbols), interval=candle_interval,
                 costs=costs, size_pct=risk.get("max_position_size_pct", 20), cfg=cfg,
                 provider=llm_settings.get("provider", env.llm_provider), model=llm_settings.get("model", env.llm_model),
+                fallback=llm_fallback,
             )
     except Exception as exc:  # noqa: BLE001 -- research is optional; a failed run is retried next window
         report = {"error": str(exc)[:500]}
@@ -153,7 +172,7 @@ def _wallet_risk_state(session, wallet, risk: dict) -> dict:
 
 def _run_wallet_tick(
     session, wallet, agent, pair_map, market_cache, strategies, risk, costs, global_settings,
-    live_trading_enabled, llm, llm_settings, death_threshold_pct, candle_interval="1h",
+    live_trading_enabled, llm, llm_settings, death_threshold_pct, candle_interval="1h", llm_fallback=None,
 ) -> dict:
     open_positions = get_open_positions(session, wallet.id)
     risk_state = _wallet_risk_state(session, wallet, risk)
@@ -169,6 +188,7 @@ def _run_wallet_tick(
         "death_threshold_pct": death_threshold_pct,
         "candle_interval": candle_interval,
         "llm": llm, "llm_provider": llm_settings.get("provider", "nvidia"), "llm_model": llm_settings.get("model", ""),
+        "llm_fallback": llm_fallback,
         "candles": {}, "prices": {}, "strategy_assignment": {}, "signals": {}, "proposals": {}, "results": [],
         **risk_state,
     }
@@ -219,6 +239,7 @@ def run_cycle(holder: str = "worker") -> dict:
             )
         except Exception:  # noqa: BLE001 -- misconfigured provider degrades this tick to mechanical-signal-only, never crashes the worker
             llm = None
+        llm_fallback = _fallback_llm(llm_settings)
 
         btc_price = _fetch_btc_price()
         wallet_summaries = []
@@ -246,6 +267,7 @@ def run_cycle(holder: str = "worker") -> dict:
             summary = _run_wallet_tick(
                 session, wallet, agent, pair_map, market_cache, wallet_strategies, wallet_risk, costs,
                 global_settings, live_trading_enabled, llm, llm_settings, death_threshold_pct, candle_interval,
+                llm_fallback,
             )
             wallet_summaries.append(summary)
 
@@ -281,7 +303,7 @@ def run_cycle(holder: str = "worker") -> dict:
                         wallet_id=wallet.id,
                     )
 
-        research_report = _maybe_research(session, settings_map, llm, llm_settings, watchlist, risk, costs, candle_interval)
+        research_report = _maybe_research(session, settings_map, llm, llm_settings, watchlist, risk, costs, candle_interval, llm_fallback)
 
         beat(session, "worker_tick", detail={"wallets": len(wallet_summaries)})
         release_lock(session, holder=holder)  # next minute's /tick can start right away

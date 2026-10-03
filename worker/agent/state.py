@@ -34,6 +34,7 @@ class AgentState(TypedDict, total=False):
     llm: Any
     llm_provider: str
     llm_model: str
+    llm_fallback: Any  # (llm, provider, model) tried once if the primary fails, or None
     strategy_assignment: dict[str, str]
     signals: dict[str, tuple[Any, Any]]  # symbol -> (Strategy row, StrategySignal)
     proposals: dict[str, Any]

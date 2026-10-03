@@ -45,7 +45,11 @@ from core.db.models import LLMCall
 
 _T = TypeVar("_T", bound=BaseModel)
 
-_RATE_LIMIT_RETRY_DELAYS_S = (2, 5)  # short -- a tick shouldn't stall long on a busy free tier
+_RETRY_DELAYS_S = (2, 5)  # short -- a tick shouldn't stall long on a busy free tier
+# 429 rate limit, 503 "Service temporarily overloaded" -- both transient on
+# NVIDIA's free tier. A 60s timeout is NOT retried (another 60s per call
+# would stall the tick); the fallback model covers that instead.
+_RETRYABLE = ("[429]", "[503]")
 
 
 def _parse_reply(schema: type[_T]):
@@ -105,10 +109,28 @@ def call_structured(
     provider: str,
     model: str,
     think: bool = True,
+    fallback: tuple | None = None,
 ) -> _T | None:
+    """`fallback` = (llm, provider, model), tried once if the primary
+    still fails after its retries. Found live (2026-10-03): on NVIDIA's
+    free tier nemotron-3-ultra failed ~24% of calls -- 503 "Service
+    temporarily overloaded" and 60s timeouts, spread evenly across every
+    10-minute window (random overload, not outages). Each attempt logs
+    its own llm_calls row under its own model, so Model Health shows
+    which model actually answered."""
+    result = _attempt(session, llm, schema, messages, node=node, wallet_id=wallet_id,
+                      provider=provider, model=model, think=think)
+    if result is None and fallback is not None:
+        fb_llm, fb_provider, fb_model = fallback
+        result = _attempt(session, fb_llm, schema, messages, node=node, wallet_id=wallet_id,
+                          provider=fb_provider, model=fb_model, think=think)
+    return result
+
+
+def _attempt(session, llm, schema, messages, *, node, wallet_id, provider, model, think):
     start = time.monotonic()
     try:
-        for delay in (*_RATE_LIMIT_RETRY_DELAYS_S, None):
+        for delay in (*_RETRY_DELAYS_S, None):
             try:
                 # Only our _ChatNVIDIA declares `think`; other clients would forward an
                 # unknown kwarg to their API, so they always get the default call.
@@ -116,8 +138,8 @@ def call_structured(
                 structured = llm.with_structured_output(schema, **({"think": False} if not think and supports_think else {}))
                 result = structured.invoke(messages)
                 break
-            except Exception as exc:  # noqa: BLE001 -- only a 429 is retried, anything else re-raises below
-                if delay is None or "[429]" not in str(exc):
+            except Exception as exc:  # noqa: BLE001 -- only transient overload is retried, anything else re-raises below
+                if delay is None or not any(code in str(exc) for code in _RETRYABLE):
                     raise
                 time.sleep(delay)
         latency_ms = int((time.monotonic() - start) * 1000)

@@ -210,7 +210,11 @@ retry.
 (retired by NVIDIA 2026-10-03, HTTP 410 -- replaced by
 `nvidia/nemotron-3-ultra-550b-a55b`, the only same-family model that
 passed strategize/decide/research live; `openai/gpt-oss-20b` also
-passed and is the fallback choice; settings.llm.model hot-switches it). A
+passed and is the automatic fallback -- `call_structured(fallback=...)`
+tries it once whenever the primary still fails after retrying 429/503,
+because Ultra on the free tier failed ~24% of calls with random 503
+overloads/timeouts; `settings.llm.fallback_model` overrides, ""
+disables; settings.llm.model hot-switches the primary). A
 real `run_cycle()` ran end to end against the real DB/CoinDCX API/NVIDIA
 API -- caught and fixed one real bug this way: a wallet's first-ever
 tick called both `initialize_benchmarks` AND `record_benchmark_tick` in
