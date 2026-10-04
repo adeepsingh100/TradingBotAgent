@@ -11,6 +11,7 @@ from __future__ import annotations
 from core.config import settings as env
 from core.db.models import Agent, Setting, Wallet
 from core.db.session import get_session
+from core.running_cost import DEFAULT_RUNNING_COST
 from core.universe import DEFAULT_UNIVERSE
 from worker.research import DEFAULT_RESEARCH
 
@@ -50,6 +51,10 @@ DEFAULT_SETTINGS = {
     },
     # Paper wallets pick their own pairs every tick from the live ticker
     # (core/universe.py); `watchlist` is only the fallback if that call fails.
+    # Daily "rent" every alive wallet pays to keep running (core/running_cost.py)
+    # -- 0.5%/day of each stake: 50 on the 10,000 paper wallets, 5 on the
+    # 1,000 live wallet. Doing nothing slowly kills it.
+    "running_cost": DEFAULT_RUNNING_COST,
     "universe": DEFAULT_UNIVERSE,
     # Candle interval every strategy reads (and research backtests on).
     # "15m" is supported but, backtested 2026-10-02 on BTC/ETH, every

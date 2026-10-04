@@ -31,6 +31,8 @@ class AgentState(TypedDict, total=False):
     cooldown_until: Any
     kill_switch: bool
     death_threshold_pct: float  # equity below starting_capital * this % kills the wallet
+    rent_paid_inr: float  # running cost paid so far (core/running_cost.py); `equity` is already net of it
+    daily_cost_inr: float  # this wallet's running cost per day
     llm: Any
     llm_provider: str
     llm_model: str

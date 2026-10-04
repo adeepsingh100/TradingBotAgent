@@ -184,7 +184,7 @@ def test_run_cycle_scopes_a_live_wallet_to_live_settings_and_approved_strategies
     captured = {}
 
     def fake_run_wallet_tick(session, wallet, agent, pair_map, market_cache, strategies, risk, costs,
-                              global_settings, live_trading_enabled, llm, llm_settings, death_threshold_pct, candle_interval, llm_fallback):
+                              global_settings, live_trading_enabled, llm, llm_settings, death_threshold_pct, candle_interval, llm_fallback, **rent):
         captured["strategies"] = set(strategies.keys())
         captured["risk"] = risk
         captured["watchlist"] = sorted(pair_map.keys())
@@ -344,7 +344,7 @@ def test_run_cycle_keeps_a_held_pair_that_fell_out_of_the_auto_watchlist(monkeyp
     monkeypatch.setattr(cycle, "is_dead", lambda *a, **kw: False)
     captured = {}
 
-    def fake_run_wallet_tick(session, wallet, agent, pair_map, *rest):
+    def fake_run_wallet_tick(session, wallet, agent, pair_map, *rest, **kw):
         captured["watchlist"] = sorted(pair_map.keys())
         return {"wallet": wallet.name, "equity": 1000.0, "prices": {}, "results": []}
 

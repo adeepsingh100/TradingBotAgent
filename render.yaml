@@ -32,8 +32,8 @@ services:
       - key: TELEGRAM_CHAT_ID
         sync: false
       - key: WALLET_SMALL_STARTING_CAPITAL
-        value: "1000"
+        value: "10000"
       - key: WALLET_LARGE_STARTING_CAPITAL
-        value: "5000"
+        value: "10000"
       - key: DEATH_THRESHOLD_PCT
         value: "20"

@@ -21,7 +21,9 @@ from streamlit_autorefresh import st_autorefresh
 
 from app.lib.queries import list_wallets
 from core.coindcx.client import get_ticker
-from core.db.models import EquityHistory, Heartbeat, Position
+from core.config import settings as env
+from core.db.models import EquityHistory, Heartbeat, Position, Setting
+from core.running_cost import daily_cost, rent_paid, runway_days
 from core.db.session import get_session
 st_autorefresh(interval=60_000, key="home_autorefresh")
 
@@ -58,12 +60,20 @@ with get_session() as session:
     current_equity = agent_points[-1].equity_inr if agent_points else wallet.current_cash
 
     status = wallet.agent.status if wallet.agent else "unknown"
-    cols = st.columns(5)
+    cost_row = session.query(Setting).filter_by(key="running_cost").one_or_none()
+    per_day = daily_cost(cost_row.value if cost_row else {}, wallet.kind)
+    paid = rent_paid(session, wallet.id)
+    death_row = session.query(Setting).filter_by(key="death_threshold_pct").one_or_none()
+    death_line = wallet.starting_capital * float(death_row.value if death_row else env.death_threshold_pct) / 100
+
+    cols = st.columns(6)
     cols[0].metric("Status", status)
-    cols[1].metric("Equity", f"₹{current_equity:,.2f}")
+    cols[1].metric("Equity (after running cost)", f"₹{current_equity:,.2f}")
     cols[2].metric("Cash", f"₹{wallet.current_cash:,.2f}")
     cols[3].metric("TDS credit", f"₹{wallet.tds_credit:,.2f}")
     cols[4].metric("Starting capital", f"₹{wallet.starting_capital:,.2f}")
+    cols[5].metric("Running cost", f"₹{per_day:,.0f}/day", f"paid ₹{paid:,.0f} · ~{runway_days(current_equity, death_line, per_day)} days runway",
+                   delta_color="off")
 
     if heartbeat is not None:
         age_seconds = (datetime.now(timezone.utc) - heartbeat.last_beat_at).total_seconds()

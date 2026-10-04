@@ -28,6 +28,7 @@ from core.db.models import Decision
 from core.llm.provider import call_structured
 from core.paper_engine import check_stop_or_target, close_position, equity, open_position
 from core.risk_manager import Proposal, RiskContext, evaluate
+from core.running_cost import runway_days
 from core.strategies.registry import generate_signal
 
 from .memory import record_lesson, track_record
@@ -97,7 +98,8 @@ def check_exits(state: dict) -> dict:
             closed_pairs.append(position.pair)
 
     remaining = [p for p in state["open_positions"] if p.pair not in closed_pairs]
-    current_equity = equity(wallet, remaining, state["prices"])
+    # Net of running cost (core/running_cost.py) -- what risk sizing and the prompt should see.
+    current_equity = equity(wallet, remaining, state["prices"]) - state.get("rent_paid_inr", 0.0)
     return {"open_positions": remaining, "equity": current_equity}
 
 
@@ -118,8 +120,23 @@ def _survival_brief(state: dict) -> str:
         f"Today's P&L: {state.get('daily_pnl_pct', 0.0):+.2f}%.\n"
         f"If your equity falls below {death_line:.2f} INR you die permanently -- "
         f"you are {eq - death_line:.2f} INR away from death.\n"
-        "Every trade costs fees, TDS and slippage, so only take trades whose edge clearly beats those costs. "
-        "A bad trade brings death closer; holding cash is always a valid way to survive.\n\n"
+        + _rent_lines(state, eq, death_line)
+        + "Every trade costs fees, TDS and slippage, so only take trades whose edge clearly beats those costs. "
+        "A bad trade brings death closer; holding cash avoids trading losses, but the running cost keeps "
+        "draining you every day, so doing nothing forever is also a slow death.\n\n"
+    )
+
+
+def _rent_lines(state: dict, eq: float, death_line: float) -> str:
+    daily = state.get("daily_cost_inr", 0.0)
+    if daily <= 0:
+        return ""
+    days = runway_days(eq, death_line, daily)
+    return (
+        f"Running costs: you pay {daily:.2f} INR every day just to stay alive "
+        f"({state.get('rent_paid_inr', 0.0):.2f} INR paid so far; already subtracted from the money above).\n"
+        f"At this burn rate you die in about {days} days even if you never lose a trade -- you must earn MORE "
+        f"than {daily:.2f} INR per day after fees and TDS to survive.\n"
     )
 
 

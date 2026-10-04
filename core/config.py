@@ -61,8 +61,8 @@ class Settings(BaseSettings):
 
     # --- Wallet/risk seed defaults (used only by seed_wallets.py; live
     # values after that come from the `settings` table) ---
-    wallet_small_starting_capital: float = 1000.0
-    wallet_large_starting_capital: float = 5000.0
+    wallet_small_starting_capital: float = 10000.0
+    wallet_large_starting_capital: float = 10000.0
     death_threshold_pct: float = 20.0
 
     @property

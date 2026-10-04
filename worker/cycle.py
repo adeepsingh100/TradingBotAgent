@@ -28,6 +28,7 @@ from core.llm.provider import get_llm
 from core.lock import acquire_tick_lock, release_lock
 from core.paper_engine import equity, get_open_positions, is_dead, kill_wallet
 from core.risk_manager import consecutive_losses
+from core.running_cost import accrue_rent, daily_cost, today_ist
 from core.universe import top_inr_symbols
 
 from .agent.graph import build_graph
@@ -62,12 +63,16 @@ def _apply_pending_resets(session) -> None:
             session.delete(row)
         for row in session.query(AgentMemory).filter_by(wallet_id=wallet_id).all():
             session.delete(row)
-        benchmark_setting = session.query(Setting).filter_by(key=f"benchmark_btc:{wallet_id}").one_or_none()
-        if benchmark_setting is not None:
-            session.delete(benchmark_setting)
+        for key in (f"benchmark_btc:{wallet_id}", f"running_cost:{wallet_id}"):
+            seed = session.query(Setting).filter_by(key=key).one_or_none()
+            if seed is not None:
+                session.delete(seed)
 
         agent = session.query(Agent).filter_by(wallet_id=wallet_id).one()
         wallet = agent.wallet
+        new_capital = (command.payload or {}).get("starting_capital")
+        if new_capital:  # e.g. moving the paper wallets to a new stake
+            wallet.starting_capital = float(new_capital)
         wallet.current_cash = wallet.starting_capital
         wallet.tds_credit = 0.0
         agent.status = "alive"
@@ -173,6 +178,7 @@ def _wallet_risk_state(session, wallet, risk: dict) -> dict:
 def _run_wallet_tick(
     session, wallet, agent, pair_map, market_cache, strategies, risk, costs, global_settings,
     live_trading_enabled, llm, llm_settings, death_threshold_pct, candle_interval="1h", llm_fallback=None,
+    rent_paid_inr=0.0, daily_cost_inr=0.0,
 ) -> dict:
     open_positions = get_open_positions(session, wallet.id)
     risk_state = _wallet_risk_state(session, wallet, risk)
@@ -189,13 +195,14 @@ def _run_wallet_tick(
         "candle_interval": candle_interval,
         "llm": llm, "llm_provider": llm_settings.get("provider", "nvidia"), "llm_model": llm_settings.get("model", ""),
         "llm_fallback": llm_fallback,
+        "rent_paid_inr": rent_paid_inr, "daily_cost_inr": daily_cost_inr,
         "candles": {}, "prices": {}, "strategy_assignment": {}, "signals": {}, "proposals": {}, "results": [],
         **risk_state,
     }
     result_state = _GRAPH.invoke(state)
     return {
         "wallet": wallet.name,
-        "equity": equity(wallet, get_open_positions(session, wallet.id), result_state.get("prices", {})),
+        "equity": equity(wallet, get_open_positions(session, wallet.id), result_state.get("prices", {})) - rent_paid_inr,
         "prices": result_state.get("prices", {}),
         "results": result_state.get("results", []),
     }
@@ -224,6 +231,8 @@ def run_cycle(holder: str = "worker") -> dict:
         live_trading_enabled = settings_map.get("live_trading", {}).get("enabled", False)
         death_threshold_pct = settings_map.get("death_threshold_pct", env.death_threshold_pct)
         candle_interval = settings_map.get("candle_interval", "1h")
+        running_cost_cfg = settings_map.get("running_cost", {})
+        today = today_ist()
 
         all_strategies = session.query(Strategy).all()
         strategies = {s.type: s for s in all_strategies if s.status != "retired"}
@@ -264,18 +273,22 @@ def run_cycle(holder: str = "worker") -> dict:
                 initialize_benchmarks(session, wallet, btc_price, costs)
                 just_initialized_benchmarks = True  # already wrote this tick's first equity_history point
 
+            wallet_daily_cost = daily_cost(running_cost_cfg, wallet.kind)
+            rent_paid_inr = accrue_rent(session, wallet, wallet_daily_cost, today)
+
             summary = _run_wallet_tick(
                 session, wallet, agent, pair_map, market_cache, wallet_strategies, wallet_risk, costs,
                 global_settings, live_trading_enabled, llm, llm_settings, death_threshold_pct, candle_interval,
-                llm_fallback,
+                llm_fallback, rent_paid_inr=rent_paid_inr, daily_cost_inr=wallet_daily_cost,
             )
             wallet_summaries.append(summary)
 
             still_open = get_open_positions(session, wallet.id)
-            current_equity = equity(wallet, still_open, summary["prices"])
+            # Net of rent: what the chart shows and what the death check judges.
+            current_equity = equity(wallet, still_open, summary["prices"]) - rent_paid_inr
             session.add(EquityHistory(
                 wallet_id=wallet.id, series="agent", equity_inr=current_equity,
-                cash_inr=wallet.current_cash, holdings_value_inr=current_equity - wallet.current_cash,
+                cash_inr=wallet.current_cash, holdings_value_inr=current_equity + rent_paid_inr - wallet.current_cash,
                 tds_credit_inr=wallet.tds_credit, recorded_at=datetime.now(timezone.utc),
             ))
             if is_dead(wallet, current_equity, death_threshold_pct):
@@ -290,7 +303,7 @@ def run_cycle(holder: str = "worker") -> dict:
                     wallet_id=wallet.id,
                 )
             elif btc_price is not None and not just_initialized_benchmarks:
-                record_benchmark_tick(session, wallet, btc_price)
+                record_benchmark_tick(session, wallet, btc_price, rent_paid_inr=rent_paid_inr)
 
             if is_live:
                 for order in session.query(LiveOrder).filter_by(wallet_id=wallet.id).all():

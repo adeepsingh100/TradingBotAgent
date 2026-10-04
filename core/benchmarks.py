@@ -46,17 +46,19 @@ def initialize_benchmarks(session, wallet: Wallet, btc_price: float, costs_setti
                                cash_inr=wallet.starting_capital, recorded_at=now))
 
 
-def record_benchmark_tick(session, wallet: Wallet, btc_price: float) -> None:
+def record_benchmark_tick(session, wallet: Wallet, btc_price: float, rent_paid_inr: float = 0.0) -> None:
     """Call every tick alongside the agent's own equity_history write.
     benchmark_cash is a flat line at starting_capital by definition --
     still written every tick so it shares the same timestamps as the
     other two curves for charting (spec section 7: "show all equity
-    curves together")."""
+    curves together"). Both benchmarks pay the same daily running cost
+    as the agent (core/running_cost.py), so the chart answers "does
+    trading beat sitting still and paying rent", not a rent-free strawman."""
     state = session.query(Setting).filter_by(key=_benchmark_key(wallet.id)).one()
     btc_qty = state.value["btc_qty"]
     now = datetime.now(timezone.utc)
 
-    session.add(EquityHistory(wallet_id=wallet.id, series="benchmark_btc", equity_inr=btc_qty * btc_price,
+    session.add(EquityHistory(wallet_id=wallet.id, series="benchmark_btc", equity_inr=btc_qty * btc_price - rent_paid_inr,
                                holdings_value_inr=btc_qty * btc_price, recorded_at=now))
-    session.add(EquityHistory(wallet_id=wallet.id, series="benchmark_cash", equity_inr=wallet.starting_capital,
+    session.add(EquityHistory(wallet_id=wallet.id, series="benchmark_cash", equity_inr=wallet.starting_capital - rent_paid_inr,
                                cash_inr=wallet.starting_capital, recorded_at=now))

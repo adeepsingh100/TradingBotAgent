@@ -21,6 +21,7 @@ from core.alerts import maybe_send_alert
 from core.db.models import ControlCommand, Setting, Strategy
 from core.db.session import get_session
 from core.promotion import clears_live_promotion, gather_live_promotion_stats
+from core.running_cost import DEFAULT_RUNNING_COST
 
 email = require_login()
 st.sidebar.write(f"Signed in as {email}")
@@ -204,6 +205,22 @@ with get_session() as session:
                 "tds_pct": tds_pct, "slippage_pct": slippage_pct, "gst_pct": gst_pct,
             })
             st.success("Cost settings saved.")
+
+    st.divider()
+
+    # --- Running cost ---
+    st.subheader("Running cost (rent)")
+    st.caption("Charged once per day (IST) to every ALIVE wallet and subtracted from its equity -- so doing nothing "
+               "slowly kills it. A ledger, never deducted from cash (live cash mirrors the real exchange). "
+               "Benchmarks pay the same. See core/running_cost.py.")
+    _, running_cost = _setting(session, "running_cost", DEFAULT_RUNNING_COST)
+    with st.form("running_cost_form"):
+        rc1, rc2 = st.columns(2)
+        paper_daily = rc1.number_input("Paper wallets, ₹/day", value=float(running_cost.get("paper_daily_inr", 50.0)), min_value=0.0)
+        live_daily = rc2.number_input("Live wallets, ₹/day", value=float(running_cost.get("live_daily_inr", 5.0)), min_value=0.0)
+        if st.form_submit_button("Save running cost"):
+            _save_setting(session, "running_cost", {"paper_daily_inr": paper_daily, "live_daily_inr": live_daily})
+            st.success("Running cost saved -- applies from the next daily charge.")
 
     st.divider()
 

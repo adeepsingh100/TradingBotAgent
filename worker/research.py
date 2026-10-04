@@ -118,6 +118,8 @@ def _prompt(strategy: Strategy, bounds: dict, baseline: dict, costs: dict, inter
         f"Current params' backtest on recent history: {baseline['train']}\n"
         f"Round-trip cost per trade is about {_round_trip_cost_pct(costs)}% of position size (fees + GST + slippage "
         "+ 1% TDS), so targets must be well above that and fewer, better trades usually beat many small ones.\n"
+        "On top of trading costs you also pay a fixed running cost every day just to stay alive, so a strategy "
+        "that merely breaks even still slowly kills you -- it must make real profit.\n"
         "Return each set as a list of {name, value} pairs using the exact parameter names, plus a one-line reason."
     )
 

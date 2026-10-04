@@ -178,6 +178,17 @@ waits on a running tick's writes. A simultaneous close of the same
 position by both is resolved by SERIALIZABLE aborting one transaction --
 never a double sell.
 
+**Running cost** (`core/running_cost.py`) -- every alive wallet pays
+`settings.running_cost` per IST day (paper 50, live 5: 0.5%/day of the
+10,000 paper / 1,000 live stakes), accrued in `run_cycle` before the
+graph runs, catching up missed days. A LEDGER under
+`running_cost:{wallet_id}`, never deducted from `wallet.current_cash`
+(live cash mirrors the exchange). It's subtracted from equity in
+`check_exits` (risk sizing + prompt), from the agent `equity_history`
+point and the `is_dead` check (rent alone can kill a wallet), and from
+both benchmarks. A reset drops the key; `reset_wallet` also honors
+`payload.starting_capital`.
+
 **Self-improving strategies** (`worker/research.py`) -- inside a tick,
 at most every `settings.research.every_hours`, one strategy per run:
 the LLM proposes up to 3 param sets within the Params bounds, each is

@@ -137,6 +137,18 @@ locally or Streamlit secrets in the cloud. Only these four keys are
 needed -- the dashboard never calls the LLM or CoinDCX directly, so it
 needs none of the worker's other secrets.
 
+## Running cost ("rent")
+
+Every alive wallet pays a fixed amount per day just to keep running --
+₹50/day on the ₹10,000 paper wallets, ₹5/day on the ₹1,000 live wallet
+(`settings.running_cost`, editable on Controls & Settings). It's a
+ledger subtracted from equity (never from cash -- live cash mirrors the
+real exchange balance), so it lowers the equity the agent sizes trades
+from, the equity chart, and the death check: a wallet that never earns
+more than its rent dies in about 160 days. Both benchmarks pay the same
+rent. The agent's prompt tells it the daily cost, the total paid, and
+its days of runway. See `core/running_cost.py`.
+
 ## Going live (real money -- Phase 7)
 
 Everything below is OFF by default. Nothing here places a real order
@@ -153,7 +165,10 @@ until every step is done:
    actually trade.
 3. **Create a live wallet**: `python -m scripts.create_live_wallet <starting_capital_inr>`
    -- only create this with capital you're OK calling a total loss.
-   Starts PAUSED.
+   Starts PAUSED. The intended setup is **₹1,000**, paying the live
+   running cost of **₹5/day** (same 0.5%/day as the ₹10,000 paper
+   wallets' ₹50/day -- see "Running cost" below). Deposit that INR on
+   CoinDCX first; rent only accrues while the wallet is alive (resumed).
 4. **Resume it** on Controls & Settings.
 5. **Turn ON live trading** on Controls & Settings -- typed
    confirmation required (`ENABLE LIVE TRADING`). This is the single
