@@ -98,6 +98,7 @@ def test_rent_alone_can_kill_a_wallet(monkeypatch):
     monkeypatch.setattr(cycle, "get_session", ctx)
     monkeypatch.setattr(cycle, "acquire_tick_lock", lambda session, holder: True)
     monkeypatch.setattr(cycle, "release_lock", lambda session, holder: None)
+    monkeypatch.setattr(cycle, "extend_lock", lambda session, holder: None)
     monkeypatch.setattr(cycle, "research_due", lambda session, every_hours: False)
     monkeypatch.setattr(cycle.coindcx_client, "get_ticker", lambda: [])
     monkeypatch.setattr(cycle, "get_llm", lambda *a, **kw: object())

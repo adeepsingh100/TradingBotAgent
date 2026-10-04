@@ -178,6 +178,18 @@ waits on a running tick's writes. A simultaneous close of the same
 position by both is resolved by SERIALIZABLE aborting one transaction --
 never a double sell.
 
+**A tick commits as it goes** (since 2026-10-04), not one transaction
+per run: after resets, before every LLM call (`strategize`/`decide`),
+and after each wallet. CockroachDB makes a READ wait on another
+transaction's uncommitted writes, and a tick spends minutes on LLM
+calls -- one long transaction hung every dashboard page until
+SQLAlchemy's pool ran out (QueuePool TimeoutError). The tick lock is
+committed with the first commit, extended per wallet
+(`core/lock.py::extend_lock`) and released at the end. The dashboard
+also sets `PGOPTIONS=-c lock_timeout=10s` (`app/lib/bootstrap.py`) so
+any query that does get stuck fails in 10s instead of draining the
+pool. Bulk-delete in reset (`Query.delete()`), never row by row.
+
 **Running cost** (`core/running_cost.py`) -- every alive wallet pays
 `settings.running_cost` per IST day (paper 50, live 5: 0.5%/day of the
 10,000 paper / 1,000 live stakes), accrued in `run_cycle` before the

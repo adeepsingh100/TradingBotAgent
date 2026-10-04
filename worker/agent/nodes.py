@@ -170,6 +170,7 @@ def strategize(state: dict) -> dict:
         "Recent market context:\n" + "\n".join(context_lines) + "\n"
         "Only include pairs you have a clear opinion on; omit the rest."
     )
+    state["session"].commit()  # never hold this tick's writes open across a slow LLM call (worker/cycle.py)
     result = call_structured(
         state["session"], llm, StrategizeOutput, [{"role": "user", "content": prompt}],
         node="strategize", wallet_id=state["wallet"].id, provider=state["llm_provider"], model=state["llm_model"],
@@ -220,6 +221,7 @@ def decide(state: dict) -> dict:
             "Decide whether to take this trade. Use the given entry/stop_loss/take_profit exactly as "
             "provided -- you only set action ('buy' or 'hold'), size_inr, confidence (0-1), and reasoning."
         )
+        state["session"].commit()  # see strategize
         proposals[symbol] = call_structured(
             state["session"], llm, Proposal, [{"role": "user", "content": prompt}],
             node="decide", wallet_id=state["wallet"].id, provider=state["llm_provider"], model=state["llm_model"],

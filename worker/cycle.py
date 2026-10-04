@@ -25,7 +25,7 @@ from core.db.models import Agent, AgentMemory, ControlCommand, Decision, EquityH
 from core.db.session import get_session
 from core.heartbeat import beat
 from core.llm.provider import get_llm
-from core.lock import acquire_tick_lock, release_lock
+from core.lock import acquire_tick_lock, extend_lock, release_lock
 from core.paper_engine import equity, get_open_positions, is_dead, kill_wallet
 from core.risk_manager import consecutive_losses
 from core.running_cost import accrue_rent, daily_cost, today_ist
@@ -53,16 +53,12 @@ def _apply_pending_resets(session) -> None:
     pending = [c for c in session.query(ControlCommand).all() if c.status == "pending" and c.command == "reset_wallet"]
     for command in pending:
         wallet_id = command.wallet_id
-        for trade in session.query(Trade).filter_by(wallet_id=wallet_id).all():
-            session.delete(trade)
-        for position in session.query(Position).filter_by(wallet_id=wallet_id).all():
-            session.delete(position)
-        for decision in session.query(Decision).filter_by(wallet_id=wallet_id).all():
-            session.delete(decision)
-        for row in session.query(EquityHistory).filter_by(wallet_id=wallet_id).all():
-            session.delete(row)
-        for row in session.query(AgentMemory).filter_by(wallet_id=wallet_id).all():
-            session.delete(row)
+        # One bulk DELETE per table, FK-safe order. Found live (2026-10-04):
+        # deleting row by row took 4,000+ round trips (~17 min) for wallets with a
+        # few days of 1-minute equity history, holding every touched row locked
+        # the whole time -- which hung every dashboard read until the pool ran dry.
+        for model in (Trade, Position, Decision, EquityHistory, AgentMemory):
+            session.query(model).filter_by(wallet_id=wallet_id).delete(synchronize_session=False)
         for key in (f"benchmark_btc:{wallet_id}", f"running_cost:{wallet_id}"):
             seed = session.query(Setting).filter_by(key=key).one_or_none()
             if seed is not None:
@@ -214,6 +210,13 @@ def run_cycle(holder: str = "worker") -> dict:
             return {"skipped": "tick lock held by another run"}
 
         _apply_pending_resets(session)
+        # Commit as the tick goes instead of one transaction for the whole run:
+        # CockroachDB makes a READ wait on another transaction's uncommitted
+        # writes, and a tick spends minutes waiting on LLM calls -- holding its
+        # writes open that long hung every dashboard page (2026-10-04). Each
+        # commit point is a consistent state; the tick lock (committed here too)
+        # keeps a second tick out until release_lock at the end.
+        session.commit()
 
         settings_map = _load_settings(session)
         risk = settings_map.get("risk", {})
@@ -273,6 +276,7 @@ def run_cycle(holder: str = "worker") -> dict:
                 initialize_benchmarks(session, wallet, btc_price, costs)
                 just_initialized_benchmarks = True  # already wrote this tick's first equity_history point
 
+            extend_lock(session, holder=holder)
             wallet_daily_cost = daily_cost(running_cost_cfg, wallet.kind)
             rent_paid_inr = accrue_rent(session, wallet, wallet_daily_cost, today)
 
@@ -315,6 +319,7 @@ def run_cycle(holder: str = "worker") -> dict:
                         f"is in an unknown state -- check CoinDCX's order history manually (LiveOrder id: {order.id}).",
                         wallet_id=wallet.id,
                     )
+            session.commit()  # this wallet's tick is complete and consistent
 
         research_report = _maybe_research(session, settings_map, llm, llm_settings, watchlist, risk, costs, candle_interval, llm_fallback)
 

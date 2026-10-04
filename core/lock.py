@@ -73,3 +73,13 @@ def release_lock(session, *, holder: str, name: str = "tick_lock") -> None:
         text("UPDATE locks SET locked_until = NULL WHERE name = :name AND holder = :holder"),
         {"name": name, "holder": holder},
     )
+
+
+def extend_lock(session, *, holder: str, name: str = "tick_lock", ttl_seconds: int = 600) -> None:
+    """Pushes a held lock's expiry out again. A tick commits as it goes
+    (worker/cycle.py) and can outlive one TTL on slow LLM calls; extending
+    at each wallet keeps a second tick from starting mid-run."""
+    session.execute(
+        text("UPDATE locks SET locked_until = :until WHERE name = :name AND holder = :holder"),
+        {"until": datetime.now(timezone.utc) + timedelta(seconds=ttl_seconds), "name": name, "holder": holder},
+    )

@@ -34,6 +34,12 @@ def ensure_env_from_secrets() -> None:
     # per-column conversion. Set before core.db.session builds its engine. The
     # worker never runs this, so its DB sessions stay on the server default.
     os.environ.setdefault("PGTZ", "Asia/Kolkata")
+    # Also dashboard-only: cap how long any query may wait on another
+    # transaction's uncommitted writes (CockroachDB makes reads wait on them).
+    # Found live 2026-10-04: a long worker transaction hung every page and each
+    # waiting rerun held a pooled connection until the pool ran out
+    # (sqlalchemy QueuePool TimeoutError). Now a stuck query fails in 10s instead.
+    os.environ.setdefault("PGOPTIONS", "-c lock_timeout=10s")
     if not any(p.exists() for p in _SECRETS_PATHS):
         return  # local dev -- core.config.Settings reads .env directly instead
 

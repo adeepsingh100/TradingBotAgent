@@ -31,6 +31,7 @@ def _no_live_ticker(monkeypatch):
         raise RuntimeError("no network in tests")
     monkeypatch.setattr(cycle.coindcx_client, "get_ticker", boom)
     monkeypatch.setattr(cycle, "release_lock", lambda session, holder: None)
+    monkeypatch.setattr(cycle, "extend_lock", lambda session, holder: None)
     monkeypatch.setattr(cycle, "research_due", lambda session, every_hours: False)
 
 

@@ -12,8 +12,9 @@ from datetime import datetime, timezone
 
 
 class _FakeQuery:
-    def __init__(self, items):
+    def __init__(self, items, session=None):
         self._items = list(items)
+        self._session = session
 
     def filter_by(self, **kw):
         self._items = [o for o in self._items if all(getattr(o, k) == v for k, v in kw.items())]
@@ -35,6 +36,11 @@ class _FakeQuery:
 
     def all(self):
         return list(self._items)
+
+    def delete(self, synchronize_session=None):  # bulk DELETE, like Query.delete()
+        for obj in self._items:
+            self._session.delete(obj)
+        return len(self._items)
 
 
 class FakeSession:
@@ -61,7 +67,7 @@ class FakeSession:
             self.added.remove(obj)
 
     def query(self, model):
-        return _FakeQuery(o for o in self.added if isinstance(o, model))
+        return _FakeQuery((o for o in self.added if isinstance(o, model)), self)
 
 
 def make_candles(closes: list[float], volumes: list[float] | None = None) -> list[dict]:
