@@ -165,6 +165,7 @@ def test_fallback_answers_when_primary_fails_and_both_attempts_are_logged(monkey
 
     assert result == _Schema(value="from backup")
     assert [(c.model, c.success) for c in session.added] == [("big", False), ("small", True)]
+    assert [(c.is_fallback, c.rescued_by) for c in session.added] == [(False, "small"), (True, None)]
 
 
 def test_fallback_not_called_when_primary_succeeds():
@@ -175,3 +176,11 @@ def test_fallback_not_called_when_primary_succeeds():
                     provider="nvidia", model="big", fallback=(backup, "nvidia", "small"))
 
     assert backup.calls == 0 and len(session.added) == 1
+
+
+def test_primary_and_fallback_both_failing_is_not_marked_rescued():
+    session = FakeSession()
+    result = call_structured(session, _FakeLLM(exc=RuntimeError("timed out")), _Schema, [], node="decide", wallet_id="w",
+                             provider="nvidia", model="big", fallback=(_FakeLLM(exc=RuntimeError("timed out")), "nvidia", "small"))
+    assert result is None
+    assert [(c.success, c.is_fallback, c.rescued_by) for c in session.added] == [(False, False, None), (False, True, None)]

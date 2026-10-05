@@ -245,6 +245,10 @@ class LLMCall(Base):
     latency_ms: Mapped[int] = mapped_column(Integer, nullable=False)
     success: Mapped[bool] = mapped_column(Boolean, nullable=False)
     error: Mapped[str | None] = mapped_column(Text)
+    # Migration 0004: a fallback attempt's own row has is_fallback=True; the
+    # primary's failed row gets rescued_by=<fallback model> when it answered.
+    is_fallback: Mapped[bool] = mapped_column(Boolean, nullable=False, default=False, server_default="false")
+    rescued_by: Mapped[str | None] = mapped_column(String)
     created_at: Mapped[datetime] = _created_at()
 
 

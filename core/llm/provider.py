@@ -118,16 +118,18 @@ def call_structured(
     10-minute window (random overload, not outages). Each attempt logs
     its own llm_calls row under its own model, so Model Health shows
     which model actually answered."""
-    result = _attempt(session, llm, schema, messages, node=node, wallet_id=wallet_id,
-                      provider=provider, model=model, think=think)
+    result, primary_row = _attempt(session, llm, schema, messages, node=node, wallet_id=wallet_id,
+                                   provider=provider, model=model, think=think)
     if result is None and fallback is not None:
         fb_llm, fb_provider, fb_model = fallback
-        result = _attempt(session, fb_llm, schema, messages, node=node, wallet_id=wallet_id,
-                          provider=fb_provider, model=fb_model, think=think)
+        result, _ = _attempt(session, fb_llm, schema, messages, node=node, wallet_id=wallet_id,
+                             provider=fb_provider, model=fb_model, think=think, is_fallback=True)
+        if result is not None:
+            primary_row.rescued_by = fb_model  # Model Health: answered, not an outage
     return result
 
 
-def _attempt(session, llm, schema, messages, *, node, wallet_id, provider, model, think):
+def _attempt(session, llm, schema, messages, *, node, wallet_id, provider, model, think, is_fallback=False):
     start = time.monotonic()
     try:
         for delay in (*_RETRY_DELAYS_S, None):
@@ -143,16 +145,15 @@ def _attempt(session, llm, schema, messages, *, node, wallet_id, provider, model
                     raise
                 time.sleep(delay)
         latency_ms = int((time.monotonic() - start) * 1000)
-        session.add(
-            LLMCall(wallet_id=wallet_id, node=node, provider=provider, model=model, latency_ms=latency_ms, success=True)
-        )
-        return result
+        row = LLMCall(wallet_id=wallet_id, node=node, provider=provider, model=model, latency_ms=latency_ms,
+                      success=True, is_fallback=is_fallback)
+        session.add(row)
+        return result, row
     except Exception as exc:  # noqa: BLE001 -- intentional: any LLM failure degrades to HOLD, never a crash
         latency_ms = int((time.monotonic() - start) * 1000)
-        session.add(
-            LLMCall(
-                wallet_id=wallet_id, node=node, provider=provider, model=model,
-                latency_ms=latency_ms, success=False, error=str(exc)[:2000],
-            )
+        row = LLMCall(
+            wallet_id=wallet_id, node=node, provider=provider, model=model,
+            latency_ms=latency_ms, success=False, error=str(exc)[:2000], is_fallback=is_fallback,
         )
-        return None
+        session.add(row)
+        return None, row
