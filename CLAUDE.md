@@ -281,6 +281,14 @@ order, and it has to be this order:
    checking the file exists first (same two paths Streamlit itself
    checks) and never touching `st.secrets` at all otherwise.
 
+**Deploying a change under `core/` needs a dashboard reboot.** Streamlit
+Community Cloud pulls on push and reruns pages, but only hot-reloads
+modules under the app's own folder (`app/`); an already-imported
+`core.*` module stays stale in memory. Found live 2026-10-05: after
+migration 0004, the new Model Health page hit `AttributeError:
+is_fallback` on the old in-memory `LLMCall` class. Fix: Manage app ->
+Reboot app after any push that touches `core/` (models especially).
+
 **Auth** (`app/lib/auth.py`): Firebase email/password REST sign-in for
 an ID token, `firebase-admin` verifies it server-side, then the
 token's email must be in `allowed_emails` (`core/config.py`) -- an
